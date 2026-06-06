@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { deflateRawSync } from "node:zlib";
+import { deflateSync } from "node:zlib";
 import type { TrtcReadiness } from "@/lib/room-contracts";
 
 const DEFAULT_EXPIRE_SECONDS = 7 * 24 * 60 * 60;
@@ -38,21 +38,24 @@ export function createTrtcUserSig(input: {
   const secretKey = process.env.TRTC_SECRET_KEY;
 
   if (!readiness.ready || !sdkAppId || !secretKey) {
-    throw new Error(`TRTC_NOT_CONFIGURED:${readiness.missing.join(",")}`);
+    throw new Error("TRTC_NOT_CONFIGURED:" + readiness.missing.join(","));
   }
 
   const expireSeconds = input.expireSeconds || DEFAULT_EXPIRE_SECONDS;
   const currentTime = Math.floor(Date.now() / 1000);
   const signContent = [
-    `TLS.identifier:${input.userId}`,
-    `TLS.sdkappid:${sdkAppId}`,
-    `TLS.time:${currentTime}`,
-    `TLS.expire:${expireSeconds}`,
+    "TLS.identifier:" + input.userId,
+    "TLS.sdkappid:" + sdkAppId,
+    "TLS.time:" + currentTime,
+    "TLS.expire:" + expireSeconds,
     "",
   ].join("\n");
+
+  // 严格按照腾讯云官方示例：原始字符串密钥 + deflateSync
   const signature = createHmac("sha256", secretKey)
-    .update(signContent)
+    .update(signContent, "utf8")
     .digest("base64");
+
   const payload = {
     "TLS.ver": "2.0",
     "TLS.identifier": input.userId,
@@ -62,9 +65,12 @@ export function createTrtcUserSig(input: {
     "TLS.sig": signature,
   };
 
+  const compressed = deflateSync(Buffer.from(JSON.stringify(payload)));
+  const userSig = base64Url(compressed);
+
   return {
     sdkAppId,
     expireAt: (currentTime + expireSeconds) * 1000,
-    userSig: base64Url(deflateRawSync(Buffer.from(JSON.stringify(payload)))),
+    userSig,
   };
 }

@@ -1,4 +1,5 @@
 import type {
+  ConversationSnapshot,
   JoinRoomResponse,
   PlanningSnapshot,
   RoomMemberSnapshot,
@@ -15,6 +16,7 @@ type RoomRecord = {
   participantLimit: number;
   version: number;
   members: Map<string, RoomMemberSnapshot>;
+  conversation: ConversationSnapshot;
   planning: PlanningSnapshot;
 };
 
@@ -24,6 +26,7 @@ type RoomStoreGlobal = {
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
 const STALE_MEMBER_MS = 30 * 1000;
+const MAX_RECENT_TURNS = 80;
 const DEFAULT_PARTICIPANT_LIMIT = Number(process.env.MAX_ROOM_PARTICIPANTS || 10);
 
 const colors = [
@@ -85,11 +88,27 @@ function makeInitials(name: string) {
   return Array.from(trimmed).slice(0, 2).join("");
 }
 
+function createConversationState(): ConversationSnapshot {
+  return {
+    rollingSummary: null,
+    recentTurns: [],
+    version: 0,
+    lastSpeechAt: null,
+    updatedAt: now(),
+    compressedUntilVersion: 0,
+  };
+}
+
 function createPlanningState(): PlanningSnapshot {
   return {
-    activeRouteId: "balanced",
-    selectedPlaceId: "forbidden-city",
-    selectedChoiceId: null,
+    summary: null,
+    routeDescription: null,
+    waypoints: [],
+    routeVariants: [],
+    selectedVariantId: null,
+    city: "北京",
+    summaryUpdatedAt: null,
+    routeUpdatedAt: null,
     updatedAt: now(),
     updatedBy: null,
   };
@@ -112,6 +131,7 @@ function toSnapshot(room: RoomRecord): RoomSnapshot {
     participantLimit: room.participantLimit,
     version: room.version,
     members,
+    conversation: room.conversation,
     planning: room.planning,
     trtc: getTrtcReadiness(),
   };
@@ -142,7 +162,32 @@ function createRoomRecord(code: string, title = "北京周末同行"): RoomRecor
     participantLimit: DEFAULT_PARTICIPANT_LIMIT,
     version: 1,
     members: new Map(),
+    conversation: createConversationState(),
     planning: createPlanningState(),
+  };
+}
+
+function appendConversationTurn(room: RoomRecord, member: RoomMemberSnapshot, text: string) {
+  const cleanText = text.replace(/\s+/g, " ").trim();
+  if (!cleanText || cleanText === member.transcript) return;
+
+  const timestamp = now();
+  const nextVersion = room.conversation.version + 1;
+  room.conversation = {
+    ...room.conversation,
+    recentTurns: [
+      ...room.conversation.recentTurns,
+      {
+        id: `${member.id}-${timestamp}-${nextVersion}`,
+        userId: member.id,
+        userName: member.name,
+        text: cleanText,
+        createdAt: timestamp,
+      },
+    ].slice(-MAX_RECENT_TURNS),
+    version: nextVersion,
+    lastSpeechAt: timestamp,
+    updatedAt: timestamp,
   };
 }
 
@@ -222,6 +267,7 @@ export function joinRoom(
     isOnline: true,
     isMuted: input.isMuted ?? existing?.isMuted ?? false,
     isSpeaking: false,
+    transcript: existing?.transcript,
     joinedAt: existing?.joinedAt || timestamp,
     lastSeenAt: timestamp,
   };
@@ -242,6 +288,7 @@ export function heartbeatRoomMember(
     isMuted?: boolean;
     isSpeaking?: boolean;
     isOnline?: boolean;
+    transcript?: string;
   },
 ): RoomSnapshot | null {
   const normalizedCode = normalizeCode(code);
@@ -251,11 +298,16 @@ export function heartbeatRoomMember(
   const member = room.members.get(input.memberId);
   if (!member) return null;
 
+  if (typeof input.transcript === "string") {
+    appendConversationTurn(room, member, input.transcript);
+  }
+
   room.members.set(input.memberId, {
     ...member,
     isMuted: input.isMuted ?? member.isMuted,
     isSpeaking: input.isSpeaking ?? member.isSpeaking,
     isOnline: input.isOnline ?? true,
+    transcript: input.transcript ?? member.transcript,
     lastSeenAt: now(),
   });
   room.version += 1;
@@ -270,13 +322,23 @@ export function updateRoomPlanning(code: string, patch: RoomStatePatch): RoomSna
   const cleanPatch = Object.fromEntries(
     Object.entries(patch).filter(([, value]) => value !== undefined),
   ) as RoomStatePatch;
+  const { conversation, ...planningPatch } = cleanPatch;
 
   room.planning = {
     ...room.planning,
-    ...cleanPatch,
+    ...planningPatch,
     updatedAt: now(),
-    updatedBy: cleanPatch.updatedBy ?? room.planning.updatedBy,
+    updatedBy: planningPatch.updatedBy ?? room.planning.updatedBy,
   };
+
+  if (conversation) {
+    room.conversation = {
+      ...room.conversation,
+      ...conversation,
+      updatedAt: now(),
+    };
+  }
+
   room.version += 1;
 
   return toSnapshot(room);

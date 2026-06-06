@@ -1,0 +1,259 @@
+﻿"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import type {
+  RouteSegmentSnapshot,
+  RouteVariantSnapshot,
+  TransportMode,
+} from "@/lib/room-contracts";
+import type { Waypoint } from "@/lib/types";
+
+type RouteMetrics = {
+  distanceText: string | null;
+  durationText: string | null;
+  costText: string | null;
+  polyline?: [number, number][];
+};
+
+const modeLabels: Record<TransportMode, string> = {
+  walking: "步行",
+  transit: "公交/地铁",
+  driving: "驾车",
+  bicycling: "骑行",
+  
+};
+
+function formatDistance(value: unknown) {
+  const meters = Number(value);
+  if (!Number.isFinite(meters) || meters <= 0) return null;
+  if (meters >= 1000) return `${(meters / 1000).toFixed(1)}km`;
+  return `${Math.round(meters)}m`;
+}
+
+function formatDuration(value: unknown) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const minutes = Math.round(seconds / 60);
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest > 0 ? `${hours}h${rest}min` : `${hours}h`;
+  }
+  return `${minutes}min`;
+}
+
+function formatCost(value: unknown) {
+  const cost = Number(value);
+  if (!Number.isFinite(cost) || cost <= 0) return null;
+  return `¥${Math.round(cost)}`;
+}
+
+function parsePolyline(polyline?: string): [number, number][] {
+  if (!polyline) return [];
+  return polyline
+    .split(";")
+    .map((point) => {
+      const [lng, lat] = point.split(",").map(Number);
+      return Number.isFinite(lng) && Number.isFinite(lat)
+        ? ([lng, lat] as [number, number])
+        : null;
+    })
+    .filter((point): point is [number, number] => point !== null);
+}
+
+function collectPolylines(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectPolylines(item));
+  }
+
+  const record = value as Record<string, unknown>;
+  const ownPolyline = typeof record.polyline === "string" ? [record.polyline] : [];
+  return [
+    ...ownPolyline,
+    ...Object.values(record).flatMap((item) => collectPolylines(item)),
+  ];
+}
+
+function readNumber(value: unknown): number | undefined {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
+function extractMetrics(data: unknown): RouteMetrics {
+  const root = data as {
+    data?: {
+      route?: {
+        paths?: Array<Record<string, unknown>>;
+        transits?: Array<Record<string, unknown>>;
+      };
+    };
+  };
+  const route = root.data?.route;
+  const path = route?.paths?.[0] || route?.transits?.[0];
+  if (!path) {
+    return {
+      distanceText: null,
+      durationText: null,
+      costText: null,
+    };
+  }
+
+  const cost = path.cost as Record<string, unknown> | undefined;
+  const polyline = collectPolylines(path).flatMap(parsePolyline);
+
+  return {
+    distanceText: formatDistance(path.distance),
+    durationText: formatDuration(path.duration),
+    costText:
+      formatCost(cost?.tolls) ||
+      formatCost(cost?.taxi_cost) ||
+      formatCost(path.cost) ||
+      null,
+    polyline: polyline.length > 0 ? polyline : undefined,
+  };
+}
+
+function locationString(location: [number, number]) {
+  return `${location[0]},${location[1]}`;
+}
+
+async function fetchSegmentRoute(
+  segment: RouteSegmentSnapshot,
+  from: Waypoint,
+  to: Waypoint,
+  city: string,
+): Promise<RouteSegmentSnapshot> {
+  if (!from.location || !to.location) {
+    return { ...segment, status: "failed" };
+  }
+
+  const response = await fetch("/api/amap/route", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      origin: locationString(from.location),
+      destination: locationString(to.location),
+      mode: segment.mode,
+      city,
+      city1: city,
+      city2: city,
+    }),
+  });
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok || data?.configured === false) {
+    return { ...segment, status: "failed" };
+  }
+
+  const metrics = extractMetrics(data);
+  return {
+    ...segment,
+    modeLabel: modeLabels[segment.mode],
+    distanceText: metrics.distanceText,
+    durationText: metrics.durationText,
+    costText: metrics.costText,
+    polyline: metrics.polyline,
+    status: metrics.distanceText || metrics.durationText ? "ready" : "failed",
+  };
+}
+
+function sumSegmentNumber(
+  segments: RouteSegmentSnapshot[],
+  key: "distanceText" | "durationText" | "costText",
+) {
+  return segments.reduce((total, segment) => {
+    const text = segment[key];
+    if (!text) return total;
+    if (text.includes("km")) return total + Number(text.replace("km", "")) * 1000;
+    if (text.includes("m")) return total + Number(text.replace("m", ""));
+    if (text.includes("h")) {
+      const [hoursPart, minutesPart] = text.split("h");
+      return total + Number(hoursPart) * 60 + Number(minutesPart?.replace("min", "") || 0);
+    }
+    if (text.includes("min")) return total + Number(text.replace("min", ""));
+    if (text.includes("¥")) return total + Number(text.replace("¥", ""));
+    return total;
+  }, 0);
+}
+
+function summarizeVariant(variant: RouteVariantSnapshot): RouteVariantSnapshot {
+  const readySegments = variant.segments.filter((segment) => segment.status === "ready");
+  const distance = sumSegmentNumber(readySegments, "distanceText");
+  const duration = sumSegmentNumber(readySegments, "durationText");
+  const cost = sumSegmentNumber(readySegments, "costText");
+
+  return {
+    ...variant,
+    totalDistanceText: distance > 0 ? formatDistance(distance) : variant.totalDistanceText,
+    totalDurationText: duration > 0 ? formatDuration(duration * 60) : variant.totalDurationText,
+    totalCostText: cost > 0 ? formatCost(cost) : variant.totalCostText,
+    routeStatus:
+      readySegments.length === variant.segments.length
+        ? "ready"
+        : readySegments.length > 0
+          ? "partial"
+          : "failed",
+  };
+}
+
+export function useRouteVariantRouting(
+  variant: RouteVariantSnapshot | null | undefined,
+  resolvedWaypoints: Waypoint[],
+  city: string,
+) {
+  const [routedVariant, setRoutedVariant] = useState<RouteVariantSnapshot | null>(
+    variant || null,
+  );
+  const [isLoading, setIsLoading] = useState(false);
+  const resolvedKey = useMemo(
+    () =>
+      resolvedWaypoints
+        .map((waypoint) => `${waypoint.id}:${waypoint.location?.join(",") || ""}`)
+        .join("|"),
+    [resolvedWaypoints],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!variant) {
+      setRoutedVariant(null);
+      return;
+    }
+
+    const currentVariant: RouteVariantSnapshot = variant;
+
+    async function resolveRoutes() {
+      setIsLoading(true);
+      const waypointById = new Map(resolvedWaypoints.map((waypoint) => [waypoint.id, waypoint]));
+      const nextSegments = await Promise.all(
+        currentVariant.segments.map((segment) => {
+          const from = waypointById.get(segment.fromWaypointId);
+          const to = waypointById.get(segment.toWaypointId);
+          if (!from || !to) return Promise.resolve(segment);
+          return fetchSegmentRoute(segment, from, to, city).catch(() => ({
+            ...segment,
+            status: "failed" as const,
+          }));
+        }),
+      );
+
+      if (!cancelled) {
+        const updatedVariant: RouteVariantSnapshot = { ...currentVariant, segments: nextSegments as RouteSegmentSnapshot[] };
+                setRoutedVariant(summarizeVariant(updatedVariant));
+        setIsLoading(false);
+      }
+    }
+
+    void resolveRoutes();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [city, resolvedKey, variant]);
+
+  return {
+    variant: routedVariant,
+    isLoading,
+  };
+}

@@ -19,12 +19,20 @@ type RoomSessionState = {
   room: RoomSnapshot | null;
   member: RoomMemberSnapshot | null;
   members: RoomMemberSnapshot[];
+  transcripts: RoomTranscript[];
   isLoading: boolean;
   error: string | null;
   muted: boolean;
   setMuted: (muted: boolean) => void;
+  sendTranscript: (text: string) => Promise<void>;
   refresh: () => Promise<void>;
   updatePlanning: (patch: RoomStatePatch) => Promise<void>;
+};
+
+type RoomTranscript = {
+  userId: string;
+  userName: string;
+  text: string;
 };
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -46,6 +54,8 @@ export function useRoomSession(
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [member, setMember] = useState<RoomMemberSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const transcriptRef = useRef("");
+  const [transcripts, setTranscripts] = useState<RoomTranscript[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [muted, setMutedState] = useState(false);
   const storedMemberRef = useRef<StoredRoomMember | null>(null);
@@ -58,6 +68,15 @@ export function useRoomSession(
     );
     const data = await readJson<{ room: RoomSnapshot }>(response);
     setRoom(data.room);
+    setTranscripts(
+      data.room.members
+        .filter((item) => item.transcript)
+        .map((item) => ({
+          userId: item.id,
+          userName: item.name,
+          text: item.transcript || "",
+        })),
+    );
     setError(null);
 
     const storedMember = storedMemberRef.current;
@@ -147,6 +166,7 @@ export function useRoomSession(
             isMuted: mutedRef.current,
             isOnline: online,
             isSpeaking: online && !mutedRef.current,
+            transcript: transcriptRef.current || undefined,
           }),
         },
       );
@@ -227,6 +247,13 @@ export function useRoomSession(
     [heartbeat],
   );
 
+  const sendTranscript = useCallback(async (text: string) => {
+    transcriptRef.current = text;
+    const storedMember = storedMemberRef.current;
+    if (!storedMember) return;
+    await heartbeat(true);
+  }, [heartbeat]);
+
   const updatePlanning = useCallback(
     async (patch: RoomStatePatch) => {
       const storedMember = storedMemberRef.current;
@@ -252,10 +279,12 @@ export function useRoomSession(
     room,
     member,
     members: room?.members || [],
+    transcripts,
     isLoading,
     error,
     muted,
     setMuted,
+    sendTranscript,
     refresh,
     updatePlanning,
   };

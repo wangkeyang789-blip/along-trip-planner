@@ -1,271 +1,170 @@
-"use client";
+﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { Place, RouteStats, RouteVariant } from "@/lib/types";
-import { demoPlaces } from "@/lib/demo-data";
+import { useEffect, useRef, useState } from "react";
+import type { Waypoint } from "@/lib/types";
 
 type AmapSearchPoi = {
   id?: string;
   name?: string;
   type?: string;
-  typecode?: string;
   address?: string | string[];
   location?: string;
-  pname?: string;
-  cityname?: string;
   adname?: string;
   photos?: Array<{ title?: string; url?: string }>;
   business?: {
-    rating?: string;
     opentime_today?: string;
     opentime_week?: string;
-    cost?: string;
-  };
-  biz_ext?: {
     rating?: string;
+    business_area?: string;
     cost?: string;
   };
 };
 
-type AmapWeatherLive = {
-  weather?: string;
-  temperature?: string;
-  winddirection?: string;
-  windpower?: string;
-};
-
-type AmapEnvelope<T> =
-  | {
-      configured: true;
-      source: "amap";
-      ok: boolean;
-      data: T;
-    }
-  | {
-      configured: false;
-      source: "amap";
-      missing: string[];
-      note: string;
-    };
-
-type UseAmapDataResult = {
-  places: Place[];
+type ResolveResult = {
+  waypoints: Waypoint[];
   weatherText: string;
-  routeStats: RouteStats;
   isConfigured: boolean;
   isLoading: boolean;
+  error: string | null;
 };
 
-const emptyRouteStats: RouteStats = {
-  distanceText: null,
-  durationText: null,
-  congestionText: null,
-  sourceStatus: "pending",
-};
-
-function parseLocation(location?: string): [number, number] | undefined {
-  const [lng, lat] = (location || "").split(",").map(Number);
-  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return undefined;
-  return [lng, lat];
+function parseLocation(loc?: string): [number, number] | undefined {
+  const [lng, lat] = (loc || "").split(",").map(Number);
+  return Number.isFinite(lng) && Number.isFinite(lat) ? [lng, lat] : undefined;
 }
 
-function formatMeters(meters?: string | number) {
-  const value = Number(meters);
-  if (!Number.isFinite(value) || value <= 0) return null;
-  if (value >= 1000) return `${(value / 1000).toFixed(1)} km`;
-  return `${Math.round(value)} m`;
-}
-
-function formatSeconds(seconds?: string | number) {
-  const value = Number(seconds);
-  if (!Number.isFinite(value) || value <= 0) return null;
-  const minutes = Math.round(value / 60);
-  if (minutes >= 60) {
-    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-  }
-  return `${minutes}m`;
-}
-
-function extractPoi(data: unknown): AmapSearchPoi | null {
-  const envelope = data as { pois?: AmapSearchPoi[]; status?: string };
-  return envelope.pois?.[0] || null;
-}
-
-function mergePoi(place: Place, poi: AmapSearchPoi | null): Place {
-  if (!poi) return place;
-
-  const photoUrl = poi.photos?.find((photo) => photo.url)?.url;
-  const location = parseLocation(poi.location);
-  const businessHours =
-    poi.business?.opentime_today || poi.business?.opentime_week || undefined;
-  const rating = poi.business?.rating || poi.biz_ext?.rating || undefined;
-  const cost = poi.business?.cost || poi.biz_ext?.cost || undefined;
-  const address = Array.isArray(poi.address) ? poi.address.join("") : poi.address;
-
-  return {
-    ...place,
-    amapId: poi.id,
-    address: address || place.address,
-    area: poi.adname || place.area,
-    category: poi.type?.split(";")[0] || place.category,
-    description: address
-      ? `${address}。更多介绍、图片和营业信息以高德实际返回为准。`
-      : "高德已返回地点基础信息，缺失字段将保持空白。",
-    location,
-    photoUrl,
-    businessHours,
-    rating,
-    cost,
-    sourceStatus: "ready",
-  };
-}
-
-function extractWeatherText(data: unknown) {
-  const lives = (data as { lives?: AmapWeatherLive[] }).lives;
-  const live = lives?.[0];
-  if (!live) return "高德天气待配置";
-
-  const temperature = live.temperature ? `${live.temperature}℃` : "";
-  const wind = live.winddirection ? `${live.winddirection}风` : "";
-
-  return [live.weather, temperature, wind].filter(Boolean).join(" · ");
-}
-
-function extractRouteStats(data: unknown): RouteStats {
-  const route = data as {
-    route?: {
-      paths?: Array<{
-        distance?: string;
-        duration?: string;
-        restriction?: string;
-      }>;
+async function searchWaypoint(
+  name: string,
+  id: string,
+  order: number,
+  city: string,
+): Promise<Waypoint> {
+  try {
+    const res = await fetch(
+      `/api/amap/search?keywords=${encodeURIComponent(name)}&region=${encodeURIComponent(city)}&page_size=1`,
+      { cache: "no-store" },
+    );
+    const data = (await res.json()) as {
+      configured?: boolean;
+      data?: { pois?: AmapSearchPoi[] };
     };
-  };
-  const path = route.route?.paths?.[0];
-  if (!path) return emptyRouteStats;
+    const poi = data?.data?.pois?.[0];
+    if (poi) {
+      const photos = poi.photos
+        ?.filter(
+          (photo): photo is { title?: string; url: string } =>
+            typeof photo.url === "string" && photo.url.trim().length > 0,
+        )
+        .map((photo) => ({
+          title: photo.title,
+          url: photo.url.trim(),
+        }));
 
-  return {
-    distanceText: formatMeters(path.distance),
-    durationText: formatSeconds(path.duration),
-    congestionText: "高德路线已返回",
-    sourceStatus: "ready",
-  };
+      return {
+        id,
+        name: poi.name || name,
+        description: undefined,
+        order,
+        resolveStatus: "ready",
+        amapId: poi.id,
+        address: Array.isArray(poi.address) ? poi.address.join("") : poi.address,
+        location: parseLocation(poi.location),
+        category: poi.type?.split(";")[0],
+        photoUrl: photos?.[0]?.url,
+        photos,
+        rating: poi.business?.rating,
+        businessHours: poi.business?.opentime_today || poi.business?.opentime_week,
+        cost: poi.business?.cost,
+      };
+    }
+  } catch {
+    // fall through
+  }
+  return { id, name, order, resolveStatus: "not_found" };
 }
 
-export function useAmapData(activeRoute: RouteVariant): UseAmapDataResult {
-  const [places, setPlaces] = useState<Place[]>(demoPlaces);
-  const [weatherText, setWeatherText] = useState("高德天气待配置");
-  const [routeStats, setRouteStats] = useState<RouteStats>(emptyRouteStats);
+export function useWaypointResolver(
+  waypointInputs: Array<{ id: string; name: string; order: number }>,
+  city: string,
+  variantId?: string | null,
+): ResolveResult {
+  const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
+  const [weatherText, setWeatherText] = useState("");
   const [isConfigured, setIsConfigured] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Use refs to avoid stale closure issues and infinite re-render loops
+  const inputsRef = useRef(waypointInputs);
+  const cityRef = useRef(city);
+  const resolveIdRef = useRef(0);
+  inputsRef.current = waypointInputs;
+  cityRef.current = city;
 
   useEffect(() => {
+    const inputs = waypointInputs;
+    const targetCity = city;
+    const currentResolveId = ++resolveIdRef.current;
+
+    if (inputs.length === 0) {
+      setWaypoints([]);
+      setWeatherText("");
+      return;
+    }
+
     let cancelled = false;
+    setIsLoading(true);
+    setError(null);
 
-    async function loadAmapData() {
-      setIsLoading(true);
-
+    (async () => {
       try {
-        const statusResponse = await fetch("/api/amap/status", {
-          cache: "no-store",
-        });
-        const status = (await statusResponse.json()) as {
-          webService?: { ready?: boolean };
-        };
+        const statusRes = await fetch("/api/amap/status", { cache: "no-store" });
+        const status = (await statusRes.json()) as { webService?: { ready?: boolean } };
+        if (cancelled || currentResolveId !== resolveIdRef.current) return;
+
         if (!status.webService?.ready) {
-          if (!cancelled) {
-            setIsConfigured(false);
-            setPlaces(demoPlaces);
-            setWeatherText("高德天气待配置");
-            setRouteStats(emptyRouteStats);
-          }
+          setIsConfigured(false);
+          setWaypoints(inputs.map((wp) => ({ ...wp, resolveStatus: "not_found" as const })));
           return;
         }
 
-        const poiResults = await Promise.all(
-          demoPlaces.map(async (place) => {
-            const response = await fetch(
-              `/api/amap/search?keywords=${encodeURIComponent(
-                place.name,
-              )}&region=${encodeURIComponent("北京")}&page_size=1`,
-              { cache: "no-store" },
-            );
-            const result = (await response.json()) as AmapEnvelope<unknown>;
-            if (!("configured" in result) || !result.configured) return place;
-            return mergePoi(place, extractPoi(result.data));
-          }),
+        setIsConfigured(true);
+        const results = await Promise.all(
+          inputs.map((wp) => searchWaypoint(wp.name, wp.id, wp.order, targetCity)),
         );
+        if (cancelled || currentResolveId !== resolveIdRef.current) return;
+        setWaypoints(results);
 
-        const weatherResponse = await fetch("/api/amap/weather?city=北京", {
-          cache: "no-store",
-        });
-        const weatherResult =
-          (await weatherResponse.json()) as AmapEnvelope<unknown>;
-
-        const routePlaces = activeRoute.placeIds
-          .map((placeId) => poiResults.find((place) => place.id === placeId))
-          .filter((place): place is Place => Boolean(place?.location));
-        let nextRouteStats = emptyRouteStats;
-
-        if (routePlaces.length >= 2) {
-          const [origin] = routePlaces;
-          const destination = routePlaces[routePlaces.length - 1];
-          const waypoints = routePlaces
-            .slice(1, -1)
-            .map((place) => place.location?.join(","));
-          const routeResponse = await fetch("/api/amap/route", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              mode: "driving",
-              origin: origin.location?.join(","),
-              destination: destination.location?.join(","),
-              waypoints,
-            }),
-          });
-          const routeResult =
-            (await routeResponse.json()) as AmapEnvelope<unknown>;
-          if ("configured" in routeResult && routeResult.configured) {
-            nextRouteStats = extractRouteStats(routeResult.data);
-          }
-        }
-
-        if (!cancelled) {
-          setIsConfigured(true);
-          setPlaces(poiResults);
-          setWeatherText(
-            "configured" in weatherResult && weatherResult.configured
-              ? extractWeatherText(weatherResult.data)
-              : "高德天气待配置",
+        try {
+          const weatherRes = await fetch(
+            `/api/amap/weather?city=${encodeURIComponent(targetCity)}`,
+            { cache: "no-store" },
           );
-          setRouteStats(nextRouteStats);
+          const weatherData = (await weatherRes.json()) as {
+            data?: { lives?: Array<{ weather?: string; temperature?: string }> };
+          };
+          const live = weatherData?.data?.lives?.[0];
+          if (live && !cancelled) {
+            setWeatherText(
+              [live.weather, live.temperature ? live.temperature + "℃" : ""]
+                .filter(Boolean)
+                .join(" · "),
+            );
+          }
+        } catch {
+          // weather is optional
         }
       } catch {
-        if (!cancelled) {
-          setIsConfigured(false);
-        }
+        if (!cancelled) setError("地图服务暂时不可用");
       } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
+        if (!cancelled) setIsLoading(false);
       }
-    }
+    })();
 
-    void loadAmapData();
+    return () => { cancelled = true; };
+    // Only re-resolve when the key or inputs length changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(waypointInputs) + "|" + city + "|" + (variantId || "")]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [activeRoute]);
-
-  return useMemo(
-    () => ({
-      places,
-      weatherText,
-      routeStats,
-      isConfigured,
-      isLoading,
-    }),
-    [isConfigured, isLoading, places, routeStats, weatherText],
-  );
+  return { waypoints, weatherText, isConfigured, isLoading, error };
 }

@@ -1,216 +1,140 @@
-# Along 同路项目上下文压缩文档
+﻿# 同路 Along · 项目上下文
 
-## 项目目标
+更新：2026-06-06（第4版 — 三阶段流水线 + UI精简 + 地图升级）
 
-Along 是一个多人协作 AI 旅行规划 Demo 网站。用户创建房间后，通过链接或二维码邀请朋友加入；多人自然语音讨论旅行想法，AI 在后台低打扰倾听、整理共识、生成建议，并把路线和地点在地图上实时更新。
+---
 
-核心产品原则：
+## 一句话目标
 
-- 不展示逐字语音转写，只显示“AI 正在倾听 / 正在整理”等轻量状态。
-- AI 提示要克制，不打断讨论，必要时用旁边的小选择卡引导。
-- 页面风格是简约、艺术、浅色、低对比度，参考用户给的路线规划 UI 图。
-- 地点、图片、营业时间、路线、交通等事实信息只使用真实 API 返回，不自建虚拟数据。
-- Demo 以低成本为优先，不上大型数据库；当前房间状态使用 Next.js 服务进程内存保存。
+多人在线协作旅行规划工具：用户通过语音/文字讨论旅行计划，AI 实时生成路线方案，高德地图展示可视化结果。
 
-## 当前技术栈
+---
 
-- Next.js 15 App Router
-- React 19
-- TypeScript
-- CSS 自定义视觉系统
-- lucide-react 图标
-- react-qr-code 二维码
-- @amap/amap-jsapi-loader 高德 JS API
-- trtc-sdk-v5 腾讯云 TRTC Web SDK
+## 架构概览
 
-本地路径：
-
-`C:\Users\14478\Documents\黑客松`
-
-本地运行：
-
-```bash
-pnpm dev
+```
+用户语音 → Web Speech / TRTC 转写
+    → room-store 内存房间（conversation.recentTurns）
+    → 协调者客户端定时触发
+    → POST /api/ai/plan { scope: "compress"|"summary"|"route" }
+    → 百炼模型池轮换（按 scope 优选 + 额度耗尽降级）
+    → POI 验证环（高德搜索确认坐标）
+    → 前端渲染地图 + 三方案选择器
 ```
 
-主要页面：
+---
 
-- `/` 首页
-- `/join/:code` 加入页
-- `/room/:code` 协作工作台
+## 本次更新（第4版）已完成改动
 
-## 已完成内容
+### 新文件
+| 文件 | 用途 |
+|------|------|
+| `src/lib/server/poi-validator.ts` | 服务端 POI 验证环：调高德搜索验证 AI 输出的每个地点，搜不到用推荐替代，两次都搜不到标 `not_found` |
+| `src/lib/server/conversation-preprocessor.ts` | 对话预处理：POI 归一化（"长城"→"八达岭长城"）、偏好聚类、去重、冲突检测 |
+| `src/components/ai-confirm-card.tsx` | 可交互确认卡：AI 理解摘要 + ✓确认 / ✗修改按钮，确认结果回写 conversation |
+| `src/app/share/[code]/page.tsx` | 分享只读页面：展示选中路线的静态快照，无需进房间 |
 
-### 产品 UI
+### 核心改动
+| 文件 | 改动 |
+|------|------|
+| `src/app/api/ai/plan/route.ts` | Prompt 中文化 + 硬约束（真实POI/30km限制/3-6地点）+ 反面示例 + few-shot；动态主题替代硬编码方案名；summary/compress/route 三 scope |
+| `src/lib/server/dashscope.ts` | 按 scope 优选模型（compress→flash, summary→turbo, route→max/plus）；`isQuotaExhaustedError` 检测额度耗尽自动跳下一模型；模型池去重 |
+| `src/components/room-workspace.tsx` | 冷启动5秒AI开场气泡；新语音到达即时反馈"已收到新对话，正在分析…"；协作摘要改用 AiConfirmCard；路线tabs在右侧；分享/复制按钮；去重"后台收集中"文字 |
+| `src/components/map-canvas.tsx` | 标准/卫星双模式（去掉交通）；`setMapStyle` 正确切换；`fitView` 仅waypoint数量变化时触发（不再和用户缩放打架）；路线线条按地图模式适配（标准紫半透 / 卫星金黄高对比）；3D建筑+POI标注 |
+| `src/app/globals.css` | 新增 ~400 行专业级样式：ConfirmCard、Route Actions、Map Canvas、Route Sidebar、Sidebar Polish、Map Detail Panel |
+| `src/lib/room-contracts.ts` | ConversationSnapshot、RouteVariantSnapshot、RouteSegmentSnapshot 等合约 |
+| `src/hooks/use-route-variant-routing.ts` | 按选中方案逐段调高德路径规划 API，填充距离/时间/费用/polyline |
 
-- 首页高质量视觉与产品预览。
-- 加入页，输入称呼后加入房间。
-- 房间页三栏布局：协作摘要、地图、AI 建议/地点详情。
-- 分享弹窗，支持复制链接、系统分享、微信扫码。
-- 最终方案弹窗，展示当前路线、成员、地点列表。
-- 响应式布局，窄屏会隐藏部分桌面侧栏按钮。
+### 时间间隔
+- Summary：每 10 秒检查（有新对话才触发）
+- Route：每 30 秒检查（有新对话才触发）
+- Compress：在 summary 之前自动触发
 
-### 房间协作
+---
 
-- `POST /api/rooms` 创建房间。
-- `GET /api/rooms/:code` 获取房间快照。
-- `POST /api/rooms/:code/join` 加入房间。
-- `POST /api/rooms/:code/heartbeat` 成员在线、静音、发言状态心跳。
-- `PATCH /api/rooms/:code/state` 同步当前路线、地点、选择。
-- `useRoomSession` 负责本地 memberId、localStorage、轮询、心跳、静音状态。
+## UI 布局
 
-注意：房间数据目前在服务进程内存中，重启 dev server 会清空。Demo 足够，正式上线建议换 Redis/Supabase/数据库。
+```
+┌─ Header ───────────────────────────────────────┐
+│ Logo · 房间名 · 成员头像 · 分享按钮              │
+├──────────┬─────────────────────┬───────────────┤
+│ 左侧栏    │  地图画布            │ 路线侧栏       │
+│ 300px    │  flex: 1            │ 280px         │
+│          │                     │               │
+│ 语音转写  │  标准/卫星切换        │ 3个方案选择    │
+│ AI确认卡  │  路线 polyline       │ 路线段详情     │
+│ 房间成员  │  POI 标记点           │ 复制/分享按钮  │
+├──────────┴─────────────────────┴───────────────┤
+│ Footer · 协作同步中 · N人在线 · 房间码 · 麦克风  │
+└────────────────────────────────────────────────┘
+```
 
-### 高德接入
+---
 
-已完成服务端代理：
+## 模型池策略
 
-- `GET /api/amap/status`
-- `GET /api/amap/search`
-- `GET /api/amap/detail`
-- `GET /api/amap/weather`
-- `POST /api/amap/route`
+| Scope | 优先级 |
+|-------|--------|
+| compress | qwen-flash → qwen-turbo → 全部 |
+| summary | qwen-turbo → qwen-plus → qwen-flash → 全部 |
+| route | qwen-max → qwen-plus → qwen-turbo → qwen-flash → glm-4.5-air → 全部 |
 
-已完成前端：
+额度耗尽（429/402/insufficient_quota）自动跳过，不中断。
 
-- `useAmapData` 会检查高德 Web Service Key。
-- 有 Key 时请求 POI、图片字段、天气、路线。
-- `MapCanvas` 有高德 JS Key 和坐标时会加载真实高德底图。
-- 没有 Key 时保持艺术化预览地图，并明确显示“待配置”。
+---
 
-### TRTC 接入
+## 地图配置
 
-已完成：
+- 标准模式：`TileLayer({ lang: 'zh_cn' })` + `setFeatures(["bg","road","building","point"])` + `mapStyle: normal`
+- 卫星模式：`TileLayer.Satellite()`
+- 路线线条：标准=紫色半透(strokeOpacity 0.45) / 卫星=金黄(strokeColor #FFD54F, opacity 0.75)
+- `fitView` 仅 waypoint 数量变化时触发，不干扰用户手动缩放
 
-- `POST /api/trtc/usersig` 后端签发 UserSig。
-- `useTrtcVoice` 使用 `trtc-sdk-v5` 进入字符串房间。
-- 支持加入语音、断开语音、静音/开麦。
-- 已接入 `RealtimeTranscriber` 插件入口，可通过 env 开启。
+---
 
-当前策略：
-
-- 没有 TRTC Key 时，按钮只切换本地静音 UI 并提示“配置 TRTC 后启用真实语音”。
-- 默认不展示逐字转写，符合低打扰原则。
-
-### 百炼/Qwen AI 接入
-
-已完成：
-
-- `POST /api/ai/plan`
-- 使用 DashScope OpenAI 兼容接口。
-- 要求模型只输出 JSON。
-- 严格提示：不得虚构地点图片、营业时间、评分、排队、交通等事实。
-- AI 规划会接收当前路线、偏好、高德上下文。
-
-### 集成状态
-
-已完成：
-
-- `GET /api/integrations/status`
-
-用于统一检查：
-
-- 高德 Web Service
-- 高德 JS API
-- TRTC
-- DashScope/百炼
-
-## 需要用户授权/配置的 API Key
-
-`.env.example` 已列出：
+## 环境配置 (.env.local)
 
 ```env
-AMAP_WEB_SERVICE_KEY=
-NEXT_PUBLIC_AMAP_JS_KEY=
-NEXT_PUBLIC_AMAP_SECURITY_JS_CODE=
-
-TRTC_SDK_APP_ID=
-TRTC_SECRET_KEY=
-NEXT_PUBLIC_TRTC_REALTIME_TRANSCRIBER=false
-
-DASHSCOPE_API_KEY=
-DASHSCOPE_MODEL=qwen-flash
-
-MAX_ROOM_PARTICIPANTS=10
+AMAP_WEB_SERVICE_KEY=<高德 Web 服务 Key>
+NEXT_PUBLIC_AMAP_JS_KEY=<高德 JS API Key>
+NEXT_PUBLIC_AMAP_SECURITY_JS_CODE=<高德安全密钥>
+TRTC_SDK_APP_ID=<TRTC SDK App ID>
+TRTC_SECRET_KEY=<TRTC Secret Key>
+DASHSCOPE_API_KEY=<百炼 API Key>
+DASHSCOPE_MODELS=qwen-flash,qwen-turbo,qwen-plus
 ```
 
-用户需要操作：
+---
 
-1. 高德开放平台
-   - Web 服务 Key：`AMAP_WEB_SERVICE_KEY`
-   - JS API Key：`NEXT_PUBLIC_AMAP_JS_KEY`
-   - JS API 安全密钥：`NEXT_PUBLIC_AMAP_SECURITY_JS_CODE`
-   - 允许域名加入 `localhost` 和未来线上域名
+## 启动命令
 
-2. 腾讯云 TRTC
-   - 创建 TRTC 应用
-   - 获取 `SDKAppID` 和 `SecretKey`
-   - 填 `TRTC_SDK_APP_ID`、`TRTC_SECRET_KEY`
-   - 如要启用实时转写，设 `NEXT_PUBLIC_TRTC_REALTIME_TRANSCRIBER=true`
+```powershell
+$bundledNode = 'C:\Users\14478\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue
+Start-Process -WindowStyle Hidden -FilePath $bundledNode -ArgumentList "node_modules\next\dist\bin\next dev . -p 3000" -WorkingDirectory "C:\Users\14478\Documents\黑客松"
+```
 
-3. 阿里云百炼
-   - 获取 DashScope/百炼 API Key
-   - 填 `DASHSCOPE_API_KEY`
+## TypeScript 验证
 
-配置后重启 dev server。
+```powershell
+& $bundledNode node_modules/typescript/bin/tsc --noEmit --skipLibCheck
+# 当前状态：0 errors ✓
+```
 
-## 最近正在处理的问题
+---
 
-用户反馈“很多按钮点了没有反应”。
+## 已知问题
 
-已处理方向：
+1. TRTC 内部警告（不影响核心流程）
+2. 浏览器扩展导致 hydration 不匹配（已 suppressHydrationWarning）
+3. Room 数据存进程内存，重启清空
+4. share 页面依赖房间 API（同进程内可用）
 
-- 给房间页大部分看起来可点的按钮增加动作或轻提示。
-- 地图模式、缩放、定位已有反馈。
-- 顶部通知、标题、头像已有反馈。
-- 偏好调整、AI 更多、地点详情、保留当前路线已有反馈。
-- 底部麦克风、语音、更多、离开已有反馈。
-- 最终方案里的查看地点、分享当前方案已有动作。
-- 加入页“检查设备”已接麦克风权限检测。
-- 首页产品预览里的“少走一点 / 保留经典”会创建房间。
+---
 
-最新状态：
+## 待改进
 
-- `tsc --noEmit` 已通过。
-- `git diff --check` 已通过。
-- 最近一次完整 `next build` 在按钮最终小修前通过；最后修了“分享当前方案”状态切换顺序后还没有再次跑 build。
-
-待继续验证：
-
-- 刷新页面后重新点击“查看方案 -> 分享当前方案”，确认分享弹窗打开。
-- 再跑一次 `next build`。
-- 浏览器验收桌面宽屏和窄屏两种布局。
-
-## 重要文件
-
-- `src/components/room-workspace.tsx` 房间工作台主界面
-- `src/components/map-canvas.tsx` 地图预览/高德底图
-- `src/components/home-screen.tsx` 首页
-- `src/components/join-screen.tsx` 加入页
-- `src/components/share-dialog.tsx` 分享弹窗
-- `src/hooks/use-room-session.ts` 房间 session、心跳、同步
-- `src/hooks/use-amap-data.ts` 高德数据拉取
-- `src/hooks/use-trtc-voice.ts` TRTC 语音
-- `src/lib/server/room-store.ts` 内存房间服务
-- `src/lib/server/amap.ts` 高德服务端代理
-- `src/lib/server/trtc.ts` TRTC UserSig
-- `src/lib/server/dashscope.ts` 百炼/Qwen 请求
-- `src/app/api/integrations/status/route.ts` 集成状态
-
-## 继续开发建议
-
-优先级建议：
-
-1. 完成按钮验收，把所有明显可点元素都处理成动作、提示或 disabled。
-2. 用户填入高德 Key 后先联调高德 POI、图片、天气、路线。
-3. 用户填入 TRTC Key 后联调真实多人语音。
-4. 用户填入 DashScope Key 后联调 AI 规划 JSON 输出。
-5. 若 Demo 要更稳，下一步把房间内存状态换成 Redis/Supabase。
-
-## 当前注意事项
-
-- PowerShell 默认输出中文可能乱码，文件实际是 UTF-8，浏览器显示正常。
-- 使用 `apply_patch` 编辑文件，不要用 shell 重写文件。
-- 项目当前 git 状态是未初始化提交的大量未跟踪文件。
-- 不要编造大众点评/美团数据；项目已放弃这些授权路径。
-- 高德可能能返回图片字段，但是否有图取决于 POI 实际返回。
+1. 持久化存储（数据库/文件）
+2. 移动端适配
+3. 高德路书导出（分享给朋友导航）
+4. 自定义地图样式编辑器集成

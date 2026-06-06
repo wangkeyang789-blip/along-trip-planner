@@ -5,3 +5,13 @@ node_modules
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# Temp/debug files
+dev-*.txt
+dev-*.log
+*_git_diff_output.txt
+step1.js
+step1b.js
+*.bak
+docx
+*.docx

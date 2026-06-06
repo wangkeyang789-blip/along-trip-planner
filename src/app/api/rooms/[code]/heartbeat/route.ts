@@ -18,6 +18,7 @@ export async function POST(request: Request, context: Context) {
     isMuted: typeof body.isMuted === "boolean" ? body.isMuted : undefined,
     isSpeaking: typeof body.isSpeaking === "boolean" ? body.isSpeaking : undefined,
     isOnline: typeof body.isOnline === "boolean" ? body.isOnline : undefined,
+    transcript: typeof body.transcript === "string" ? body.transcript : undefined,
   });
 
   return NextResponse.json({ room });

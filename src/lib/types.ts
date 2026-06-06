@@ -58,3 +58,34 @@ export type ChoiceOption = {
   description: string;
   icon: string;
 };
+
+
+// Dynamic waypoint from AI planning
+export type Waypoint = {
+  id: string;          // unique id from AI (e.g. "poi-0", "poi-1")
+  name: string;        // place name in Chinese
+  description?: string; // why this place was chosen (from AI)
+  order: number;       // visit order
+  resolveStatus: "pending" | "searching" | "ready" | "not_found";
+  // Filled after Amap POI search:
+  amapId?: string;
+  address?: string;
+  location?: [number, number];
+  category?: string;
+  photoUrl?: string;
+  rating?: string;     // rating from Amap (e.g. "4.9")
+  businessHours?: string; // opening hours from Amap
+  cost?: string;       // average cost
+  photos?: Array<{ title?: string; url: string }>; // photo gallery from Amap
+};
+
+// AI planner output
+export type AiPlanOutput = {
+  summary: string;         // overall summary of team discussion
+  routeDescription: string; // description of the route
+  waypoints: Waypoint[];   // ordered list of places
+  mapUpdates: {
+    center?: [number, number]; // map center [lng, lat]
+    zoom?: number;
+  };
+};
