@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Mic,
   Square,
+  Play,
   Route,
   Compass,
   Sparkles,
@@ -14,8 +15,10 @@ import {
   MessageCircleQuestion,
   Trash2,
   ChevronDown,
+  Type,
 } from "lucide-react";
 import { useWebSpeech } from "@/hooks/use-web-speech";
+import { useMediaRecorder } from "@/hooks/use-media-recorder";
 import { useWaypointResolver } from "@/hooks/use-amap-data";
 import { useRouteVariantRouting } from "@/hooks/use-route-variant-routing";
 import { MapCanvas } from "@/components/map-canvas";
@@ -62,6 +65,7 @@ const CITIES = ["珠海", "北京", "上海", "杭州", "厦门"];
 
 export function TripRecorder() {
   const speech = useWebSpeech();
+  const mediaRecorder = useMediaRecorder();
 
   const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
   const [currentTranscript, setCurrentTranscript] = useState("");
@@ -70,6 +74,10 @@ export function TripRecorder() {
   const [plan, setPlan] = useState<AgentPlan | null>(null);
   const [selectedWpId, setSelectedWpId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [mediaText, setMediaText] = useState("");
+  const [showTextInput, setShowTextInput] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeError, setTranscribeError] = useState<string | null>(null);
 
   /* -------------------- Real-time transcript -------------------- */
 
@@ -90,27 +98,55 @@ export function TripRecorder() {
 
   /* -------------------- Recording control -------------------- */
 
+  const speechAvailable = speech.isSupported;
+
   const toggleRecording = useCallback(() => {
-    if (speech.isListening) {
-      speech.stop();
-      if (currentTranscript.trim()) {
-        setTranscriptLog((prev) => [
-          ...prev,
-          {
-            id: generateId(),
-            time: formatTime(new Date()),
-            text: currentTranscript.trim(),
-          },
-        ]);
+    if (speechAvailable) {
+      if (speech.isListening) {
+        speech.stop();
+        if (currentTranscript.trim()) {
+          setTranscriptLog((prev) => [
+            ...prev,
+            {
+              id: generateId(),
+              time: formatTime(new Date()),
+              text: currentTranscript.trim(),
+            },
+          ]);
+          setCurrentTranscript("");
+        }
+        void requestPlan();
+      } else {
+        speech.clear();
         setCurrentTranscript("");
+        speech.start();
       }
-      void requestPlan();
     } else {
-      speech.clear();
-      setCurrentTranscript("");
-      speech.start();
+      if (mediaRecorder.isRecording) {
+        mediaRecorder.stop();
+      } else if (mediaRecorder.isStopped) {
+        mediaRecorder.clear();
+      } else {
+        mediaRecorder.start();
+      }
     }
-  }, [speech, currentTranscript]);
+  }, [speech, speechAvailable, currentTranscript, mediaRecorder]);
+
+  const submitMediaText = useCallback(() => {
+    const text = mediaText.trim();
+    if (!text) return;
+    setTranscriptLog((prev) => [
+      ...prev,
+      {
+        id: generateId(),
+        time: formatTime(new Date()),
+        text,
+      },
+    ]);
+    setMediaText("");
+    setShowTextInput(false);
+    void requestPlan();
+  }, [mediaText]);
 
   /* -------------------- AI Planning -------------------- */
 
@@ -165,9 +201,12 @@ export function TripRecorder() {
     setCurrentTranscript("");
     setPlan(null);
     setSelectedWpId(null);
+    setMediaText("");
+    setShowTextInput(false);
     speech.clear();
+    mediaRecorder.clear();
     showNotice("已清空记录");
-  }, [speech, showNotice]);
+  }, [speech, mediaRecorder, showNotice]);
 
   /* -------------------- Waypoint resolution -------------------- */
 
@@ -249,18 +288,114 @@ export function TripRecorder() {
           {/* Recording control */}
           <div className="recorder-control">
             <button
-              className={`recorder-btn ${speech.isListening ? "is-recording" : ""}`}
+              className={`recorder-btn ${speech.isListening || mediaRecorder.isRecording ? "is-recording" : ""}`}
               onClick={toggleRecording}
               type="button"
-              aria-label={speech.isListening ? "停止录音" : "开始录音"}
+              aria-label={
+                speech.isListening || mediaRecorder.isRecording
+                  ? "停止录音"
+                  : speechAvailable
+                    ? "开始录音"
+                    : mediaRecorder.isStopped
+                      ? "重新录音"
+                      : "开始录音"
+              }
             >
-              {speech.isListening ? <Square size={28} /> : <Mic size={32} />}
+              {speech.isListening || mediaRecorder.isRecording ? (
+                <Square size={28} />
+              ) : (
+                <Mic size={32} />
+              )}
             </button>
             <p className="recorder-label">
-              {speech.isListening ? "正在录音…" : "点击开始录音"}
+              {speech.isListening
+                ? "正在实时转写…"
+                : mediaRecorder.isRecording
+                  ? `录音中 ${Math.floor(mediaRecorder.duration / 60).toString().padStart(2, "0")}:${(mediaRecorder.duration % 60).toString().padStart(2, "0")}`
+                  : speechAvailable
+                    ? "点击开始录音"
+                    : "点击录制音频备忘"}
             </p>
-            {speech.error && <p className="recorder-hint error">{speech.error}</p>}
-            {speech.hint && <p className="recorder-hint">{speech.hint}</p>}
+            {speech.error && !speechAvailable && (
+              <p className="recorder-hint error">
+                {speech.error}
+                <button
+                  className="recorder-fallback-link"
+                  onClick={() => setShowTextInput(true)}
+                  type="button"
+                >
+                  改用文字输入
+                </button>
+              </p>
+            )}
+            {speech.hint && speechAvailable && <p className="recorder-hint">{speech.hint}</p>}
+            {!speechAvailable && !mediaRecorder.isRecording && (
+              <p className="recorder-hint">
+                当前浏览器语音转写不可用，已切换为音频录制模式。
+                {!showTextInput && (
+                  <button
+                    className="recorder-fallback-link"
+                    onClick={() => setShowTextInput(true)}
+                    type="button"
+                  >
+                    改用文字输入
+                  </button>
+                )}
+              </p>
+            )}
+
+            {/* MediaRecorder audio playback */}
+            {mediaRecorder.isStopped && mediaRecorder.audioUrl && (
+              <div className="recorder-media-playback">
+                <audio src={mediaRecorder.audioUrl} controls style={{ width: "100%", height: 32 }} />
+                <p className="recorder-hint">录音已保存，可播放回顾。请补充文字描述：</p>
+                <div className="recorder-media-input">
+                  <input
+                    type="text"
+                    placeholder="输入讨论内容，按回车发送…"
+                    value={mediaText}
+                    onChange={(e) => setMediaText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") submitMediaText();
+                    }}
+                  />
+                  <button onClick={submitMediaText} type="button">
+                    <Sparkles size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Text input fallback */}
+            {showTextInput && (
+              <div className="recorder-text-fallback">
+                <div className="recorder-media-input">
+                  <Type size={14} />
+                  <input
+                    type="text"
+                    placeholder="输入讨论内容，按回车发送…"
+                    value={mediaText}
+                    onChange={(e) => setMediaText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") submitMediaText();
+                    }}
+                  />
+                  <button onClick={submitMediaText} type="button">
+                    <Sparkles size={14} />
+                  </button>
+                </div>
+                <button
+                  className="recorder-fallback-close"
+                  onClick={() => {
+                    setShowTextInput(false);
+                    setMediaText("");
+                  }}
+                  type="button"
+                >
+                  取消
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Transcript log */}
@@ -283,7 +418,7 @@ export function TripRecorder() {
             </div>
 
             <div className="recorder-messages">
-              {transcriptLog.length === 0 && !speech.isListening ? (
+              {transcriptLog.length === 0 && !speech.isListening && !mediaRecorder.isRecording ? (
                 <div className="recorder-empty">
                   <span>点击上方按钮开始录音，录下你和朋友的行程讨论</span>
                 </div>
@@ -607,6 +742,76 @@ export function TripRecorder() {
         }
         .recorder-route-sidebar {
           width: 280px;
+        }
+        .recorder-fallback-link {
+          display: inline;
+          margin-left: 6px;
+          border: 0;
+          background: transparent;
+          color: #7167f6;
+          font-size: 11px;
+          font-weight: 600;
+          cursor: pointer;
+          text-decoration: underline;
+          text-underline-offset: 2px;
+        }
+        .recorder-fallback-link:hover {
+          color: #5a4fd9;
+        }
+        .recorder-media-playback {
+          width: 100%;
+          margin-top: 8px;
+        }
+        .recorder-media-playback audio {
+          border-radius: 8px;
+          height: 32px;
+        }
+        .recorder-media-input {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 8px;
+          padding: 6px 10px;
+          border: 1px solid var(--ink-200);
+          border-radius: 10px;
+          background: var(--white);
+        }
+        .recorder-media-input input {
+          flex: 1;
+          border: 0;
+          background: transparent;
+          font-size: 13px;
+          color: var(--ink-900);
+          outline: none;
+        }
+        .recorder-media-input input::placeholder {
+          color: var(--ink-500);
+        }
+        .recorder-media-input button {
+          display: grid;
+          width: 28px;
+          height: 28px;
+          place-items: center;
+          border: 0;
+          border-radius: 8px;
+          background: var(--violet-100);
+          color: var(--violet-700);
+          cursor: pointer;
+        }
+        .recorder-text-fallback {
+          width: 100%;
+          margin-top: 8px;
+        }
+        .recorder-fallback-close {
+          margin-top: 6px;
+          border: 0;
+          background: transparent;
+          color: var(--ink-500);
+          font-size: 11px;
+          cursor: pointer;
+        }
+        .recorder-fallback-close:hover {
+          color: var(--ink-700);
         }
       `}</style>
     </main>

@@ -55,6 +55,7 @@ export function useWebSpeech() {
   const [interimText, setInterimText] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  const [needsFallback, setNeedsFallback] = useState(false);
 
   const clearHintTimer = useCallback(() => {
     if (hintTimerRef.current === null) return;
@@ -94,11 +95,13 @@ export function useWebSpeech() {
     if (!SpeechRecognition) {
       setStatus("unsupported");
       setError("当前浏览器不支持语音识别，请使用 Chrome 或 Edge");
+      setNeedsFallback(true);
       return;
     }
 
     stoppedByUserRef.current = false;
     shouldRestartRef.current = true;
+    setNeedsFallback(false);
     setHint(null);
 
     const recognition = new SpeechRecognition();
@@ -146,6 +149,9 @@ export function useWebSpeech() {
         setHint(`语音服务暂时不可用（第${networkErrorCountRef.current}次），自动重试中…`);
         // Don't clear interim text so user can still see what was transcribed
         setStatus("error");
+        if (networkErrorCountRef.current >= maxNetworkRetries.current) {
+          setNeedsFallback(true);
+        }
         // onend will handle restart
         return;
       }
@@ -159,6 +165,7 @@ export function useWebSpeech() {
       if (shouldStopAfterError(event.error)) {
         shouldRestartRef.current = false;
         recognitionRef.current = null;
+        setNeedsFallback(true);
         try { recognition.stop(); } catch { /* ignore */ }
       }
     };
@@ -189,6 +196,7 @@ export function useWebSpeech() {
         if (networkErrorCountRef.current >= maxNetworkRetries.current) {
           shouldRestartRef.current = false;
           setStatus("idle");
+          setNeedsFallback(true);
           setHint("语音服务暂不可用，请稍后重新点击麦克风按钮");
           return;
         }
@@ -234,6 +242,7 @@ export function useWebSpeech() {
     setInterimText("");
     setError(null);
     setHint(null);
+    setNeedsFallback(false);
   }, []);
 
   useEffect(() => {
@@ -257,6 +266,7 @@ export function useWebSpeech() {
     isReady: supportStatus !== "checking",
     isSupported: supportStatus === "supported",
     isListening: status === "listening",
+    needsFallback,
     start,
     stop,
     clear,
