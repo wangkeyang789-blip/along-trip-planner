@@ -43,7 +43,6 @@ import type { Waypoint } from "@/lib/types";
 import { BrandLogo } from "@/components/brand-logo";
 import { MapCanvas } from "@/components/map-canvas";
 import { ShareDialog } from "@/components/share-dialog";
-import { AiConfirmCard } from "@/components/ai-confirm-card";
 import { demoMembers } from "@/lib/demo-data";
 import type {
   PlanningWaypointSnapshot,
@@ -54,42 +53,7 @@ import type {
 } from "@/lib/room-contracts";
 import { useTrtcVoice } from "@/hooks/use-trtc-voice";
 
-type AgentPlanApiResponse = {
-  configured?: boolean;
-  source?: string;
-  model?: string;
-  error?: string;
-  raw?: string;
-  attempts?: Array<{ model: string; ok: boolean; error?: string }>;
-  plan?: {
-    summary?: string;
-    routeDescription?: string;
-    city?: string;
-    waypoints?: PlanningWaypointSnapshot[];
-    routeVariants?: RouteVariantSnapshot[];
-  };
-};
 
-function formatAgentApiMessage(
-  response: Response,
-  data: AgentPlanApiResponse,
-) {
-  if (data.configured === false) {
-    return "AI 规划 API 还没配置，请检查 DASHSCOPE_API_KEY";
-  }
-
-  if (!response.ok) {
-    return data.error || "AI 规划 API 调用失败，稍后可重试";
-  }
-
-  return (
-    (data.plan?.summary && data.model
-      ? `${data.plan.summary}（${data.model}）`
-      : data.plan?.summary) ||
-    data.raw ||
-    "AI 规划 API 已返回"
-  );
-}
 import { useWebSpeech } from "@/hooks/use-web-speech";
 
 const fallbackMembers: RoomMemberSnapshot[] = demoMembers.map(
@@ -152,29 +116,21 @@ export function RoomWorkspace() {
     muted,
     setMuted,
     sendTranscript,
+    sendMessage,
     updatePlanning,
   } = useRoomSession(code);
   const [shareOpen, setShareOpen] = useState(false);
   const [finalOpen, setFinalOpen] = useState(false);
-  const [agentNote, setAgentNote] = useState<string | null>(null);
   const [agentThinking, setAgentThinking] = useState(false);
-  const [greetingShown, setGreetingShown] = useState(false);
   const [instantFeedback, setInstantFeedback] = useState<string | null>(null);
-  const [confirmedSummary, setConfirmedSummary] = useState<string | null>(null);
-  const [confirmCountdown, setConfirmCountdown] = useState<number | null>(null);
-  const confirmTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [summaryTab, setSummaryTab] = useState<"summary" | "route">("summary");
   const [selectedWpId, setSelectedWpId] = useState<string | null>(null);
+  const [messageText, setMessageText] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
 
   const planning = room?.planning;
   const conversation = room?.conversation;
-  const selectedVariant =
-    planning?.routeVariants.find(
-      (variant) => variant.id === planning.selectedVariantId,
-    ) ||
-    planning?.routeVariants[0] ||
-    null;
+  const selectedVariant = planning?.routeVariants?.[0] || null;
   const waypointsFromApi: Array<{ id: string; name: string; order: number }> = planning?.waypoints?.map((wp) => ({
     id: wp.id,
     name: wp.name,
@@ -231,7 +187,6 @@ export function RoomWorkspace() {
   };
 
   const sentTranscriptRef = useRef("");
-  const lastSummaryVersionRef = useRef(0);
   const lastRouteVersionRef = useRef(0);
   const compressionInFlightRef = useRef(false);
   const lastRoutedPatchRef = useRef("");
@@ -241,22 +196,6 @@ export function RoomWorkspace() {
     roomRef.current = room;
   }, [room]);
 
-  // Cold start: AI greeting if no conversation after 5 seconds
-  useEffect(() => {
-    if (greetingShown) return;
-    const timer = window.setTimeout(() => {
-      const currentRoom = roomRef.current;
-      if (!currentRoom) return;
-      const hasConversation = currentRoom.conversation.recentTurns.length > 0;
-      if (!hasConversation && !greetingShown) {
-        setGreetingShown(true);
-        setAgentNote("嗨，想去哪儿？国内还是国外？大概几天？有特别想去的地方吗？");
-        // Auto-clear after 8 seconds
-        setTimeout(() => setAgentNote(null), 8000);
-      }
-    }, 5000);
-    return () => window.clearTimeout(timer);
-  }, [isLoading, greetingShown]);
 
   // Instant feedback when new transcript arrives
   useEffect(() => {
@@ -266,7 +205,7 @@ export function RoomWorkspace() {
     if (turns.length === 0) return;
     const lastTurn = turns[turns.length - 1];
     if (!lastTurn) return;
-    setInstantFeedback("已收到新对话，正在分析…");
+    setInstantFeedback("…");
     const timer = window.setTimeout(() => setInstantFeedback(null), 3000);
     return () => window.clearTimeout(timer);
   }, [conversation?.version]);
@@ -339,12 +278,11 @@ export function RoomWorkspace() {
     }
   };
 
-  const requestAgentPlan = async (scope: "summary" | "route") => {
+  const requestAgentPlan = async (scope: "route") => {
     const currentRoom = roomRef.current;
     const currentConversation = currentRoom?.conversation;
     if (!currentConversation) return;
     setAgentThinking(true);
-    setAgentNote(null);
 
     try {
       const currentPlanning = currentRoom?.planning;
@@ -361,16 +299,10 @@ export function RoomWorkspace() {
       });
       const data = await response.json().catch(() => ({}));
 
-      // Update visual status
-      const message = formatAgentApiMessage(response, data);
-      setAgentNote(message);
-
       if (response.ok && data.plan) {
         const plan = data.plan;
         const patch: RoomStatePatch = {
-          ...(scope === "summary"
-            ? { summaryUpdatedAt: Date.now() }
-            : { routeUpdatedAt: Date.now() }),
+          routeUpdatedAt: Date.now(),
         };
 
         if (plan.city && typeof plan.city === "string") {
@@ -378,94 +310,37 @@ export function RoomWorkspace() {
         }
 
         if (plan.summary) patch.summary = plan.summary;
-        if (scope === "route") {
-          if (plan.routeDescription) patch.routeDescription = plan.routeDescription;
-          if (Array.isArray(plan.routeVariants) && plan.routeVariants.length > 0) {
-            const routeVariants = plan.routeVariants.map(
-              (variant: RouteVariantSnapshot, index: number) => ({
-                ...variant,
-                id: variant.id || `variant-${index}`,
-                waypoints: normalizeWaypoints(variant.waypoints),
-              }),
-            );
-            patch.routeVariants = routeVariants;
-            patch.selectedVariantId = routeVariants[0]?.id || null;
-            patch.waypoints = normalizeWaypoints(routeVariants[0]?.waypoints);
-          } else if (Array.isArray(plan.waypoints) && plan.waypoints.length > 0) {
-            patch.waypoints = normalizeWaypoints(plan.waypoints);
-          }
+        if (plan.routeDescription) patch.routeDescription = plan.routeDescription;
+        if (Array.isArray(plan.routeVariants) && plan.routeVariants.length > 0) {
+          const routeVariants = plan.routeVariants.map(
+            (variant: RouteVariantSnapshot, index: number) => ({
+              ...variant,
+              id: variant.id || `variant-${index}`,
+              waypoints: normalizeWaypoints(variant.waypoints),
+            }),
+          );
+          patch.routeVariants = routeVariants;
+          patch.selectedVariantId = routeVariants[0]?.id || null;
+          patch.waypoints = normalizeWaypoints(routeVariants[0]?.waypoints);
+        } else if (Array.isArray(plan.waypoints) && plan.waypoints.length > 0) {
+          patch.waypoints = normalizeWaypoints(plan.waypoints);
         }
 
         if (Object.keys(patch).length > 0) {
           await patchPlanning(patch);
-          if (scope === "route") {
-            showNotice("AI 已生成路线方案，正在加载地图…");
-          } else {
-            showNotice("AI 已更新协作摘要");
-          }
         }
       } else {
         showNotice(data.configured === false ? "AI API 未配置" : "AI API 暂时不可用");
-        if (data.error) setAgentNote("AI 规划失败：" + data.error);
       }
     } catch (planError) {
       console.warn("[AgentPlan] fetch failed:", planError);
       showNotice("AI 规划服务异常，稍后重试");
-      setAgentNote(
-        planError instanceof Error ? "AI 规划失败：" + planError.message : "AI 规划失败"
-      );
     } finally {
       setAgentThinking(false);
     }
   };
 
-  // Summary timer: check every 10s, generate summary, then start confirm countdown
-  useEffect(() => {
-    if (!isCoordinator) return undefined;
-
-    const timer = window.setInterval(() => {
-      const currentConversation = roomRef.current?.conversation;
-      if (!currentConversation) return;
-      if (currentConversation.version <= lastSummaryVersionRef.current) return;
-      lastSummaryVersionRef.current = currentConversation.version;
-      void requestConversationCompression().finally(() => {
-        void requestAgentPlan("summary");
-      });
-    }, 10000);
-
-    return () => window.clearInterval(timer);
-  }, [isCoordinator]);
-
-  // When summary arrives, start 10s auto-confirm countdown
-  useEffect(() => {
-    if (!planning?.summary || confirmedSummary === planning.summary) return;
-    // New summary arrived, start countdown
-    setConfirmCountdown(10);
-    setConfirmedSummary(null);
-
-    // Clear existing timer
-    if (confirmTimerRef.current) clearInterval(confirmTimerRef.current);
-
-    confirmTimerRef.current = setInterval(() => {
-      setConfirmCountdown(prev => {
-        if (prev === null || prev <= 1) {
-          // Auto-confirm and trigger route
-          if (confirmTimerRef.current) clearInterval(confirmTimerRef.current);
-          confirmTimerRef.current = null;
-          setConfirmedSummary(planning?.summary || null);
-          void requestAgentPlan("route");
-          return null;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (confirmTimerRef.current) clearInterval(confirmTimerRef.current);
-    };
-  }, [planning?.summary]);
-
-  // Fallback route timer: only triggers if no confirm happened for 60s
+  // AI trigger timer: check every 10s, compress then directly request route
   useEffect(() => {
     if (!isCoordinator) return undefined;
 
@@ -473,19 +348,35 @@ export function RoomWorkspace() {
       const currentConversation = roomRef.current?.conversation;
       if (!currentConversation) return;
       if (currentConversation.version <= lastRouteVersionRef.current) return;
-      if (confirmedSummary || confirmCountdown !== null) return; // skip if confirm flow is active
       lastRouteVersionRef.current = currentConversation.version;
-      void requestAgentPlan("route");
-    }, 60000);
+      void requestConversationCompression().finally(() => {
+        void requestAgentPlan("route");
+      });
+    }, 10000);
 
     return () => window.clearInterval(timer);
-  }, [isCoordinator, confirmedSummary, confirmCountdown]);
+  }, [isCoordinator]);
 
 
   // Direction selection removed - AI handles all planning
 
   const handleSelectWaypoint = (wpId: string) => {
     showNotice("已选地点");
+  };
+
+  const handleSendMessage = async () => {
+    const text = messageText.trim();
+    if (!text || sendingMessage) return;
+    setSendingMessage(true);
+    try {
+      await sendMessage(text);
+      setMessageText("");
+      showNotice("消息已发送");
+    } catch {
+      showNotice("发送失败，请重试");
+    } finally {
+      setSendingMessage(false);
+    }
   };
 
   const handleMicClick = () => {
@@ -609,226 +500,96 @@ export function RoomWorkspace() {
           </div>
 
           <div className="sidebar-scroll">
-            {summaryTab === "summary" ? (
-              <>
-                <section className={"listening-card" + (agentThinking ? " is-thinking" : "")}>
-                  <div className="listening-ambient" />
-                  <div className="listening-header">
-                    <span className="ai-orb">
-                      <Sparkles size={17} />
-                    </span>
-                    <div>
-                      <strong>{agentThinking ? "AI 正在整理" : "语音转写"}</strong>
-                      <span>{instantFeedback || ""}</span>
-                    </div>
-                    <span className="listening-live">
-                      <i />
-                      {speech.isListening ? "语音识别中" : ""}
-                    </span>
-                  </div>
-                  <div className="sound-wave" aria-hidden="true">
-                    {Array.from({ length: 28 }).map((_, index) => (
-                      <i key={index} />
-                    ))}
-                  </div>
-                </section>
-
-                {(error || !trtcReady || trtcVoice.error) && (
-                  <div className={`room-service-alert ${error ? "" : "is-muted"}`}>
-                    <ShieldCheck size={14} />
-                    <span>
-                      {trtcVoice.error
-                        ? trtcVoice.error
-                        : error
-                        ? "房间同步暂时不稳定，页面会继续自动重试。"
-                        : "TRTC 语音尚未配置，当前先运行房间协作与高德地图 Demo。"}
-                    </span>
-                  </div>
-                )}
-
-                <section className="sidebar-section">
-                  <div className="section-title">
-                    <div>
-                      <CheckCircle2 size={16} />
-                      <strong>协作摘要</strong>
-                    </div>
-                  </div>
-                  {planning?.summary ? (
-                    <AiConfirmCard
-                      summary={`${confirmCountdown !== null ? `[${confirmCountdown}s后自动确认] ` : ""}我理解为：${planning.summary}`}
-                      themes={[]}
-                      city={planning.city || ""}
-                      isConfirmed={!!confirmedSummary}
-                      onConfirm={(correctedText) => {
-                        // Clear countdown
-                        if (confirmTimerRef.current) clearInterval(confirmTimerRef.current);
-                        setConfirmCountdown(null);
-                        const text = correctedText || planning.summary || "";
-                        setConfirmedSummary(text);
-                        void sendTranscript("[用户确认] " + text);
-                        showNotice("已确认，正在生成路线…");
-                        // Immediately trigger route generation
-                        void requestAgentPlan("route");
-                      }}
-                      onModify={() => {
-                        showNotice("请输入修改内容");
-                      }}
-                    />
-                  ) : (
-                    <div className="consensus-card">
-                      <div className="consensus-primary">
-                        <span className="consensus-icon">
-                          <Compass size={18} />
-                        </span>
-                        <div>
-                          <strong>AI 正在倾听讨论…</strong>
-                          <span>开始讨论你的旅行计划吧</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </section>
-
-                
-
-                <section className="sidebar-section member-section">
-                  <div className="section-title">
-                    <div>
-                      <UsersRound size={16} />
-                      <strong>房间成员</strong>
-                    </div>
-                    <button onClick={() => setShareOpen(true)} type="button">
-                      邀请
-                    </button>
-                  </div>
-                  <div className="member-list">
-                    {displayMembers.map((item) => (
-                      <div
-                        className={`member-row ${
-                          item.isOnline ? "" : "is-offline"
-                        }`}
-                        key={item.id}
-                      >
-                        <span
-                          className={`member-avatar ${
-                            item.isSpeaking ? "is-speaking" : ""
-                          }`}
-                          style={
-                            { "--avatar-color": item.color } as CSSProperties
-                          }
-                        >
-                          {item.initials}
-                        </span>
-                        <span>
-                          <strong>{item.name}</strong>
-                          <small>{memberStatus(item)}</small>
-                        </span>
-                        {item.isHost ? (
-                          <Crown size={14} />
-                        ) : item.isMuted ? (
-                          <MicOff size={14} />
-                        ) : (
-                          <AudioLines size={14} />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              </>
-            ) : (
-              <section className="route-panel">
-                <div className="route-panel-intro">
-                  <span className="route-panel-icon">
-                    <Route size={20} />
-                  </span>
-                  <div>
-                    <strong>AI 规划的路线</strong>
-                    <span>{planning?.routeDescription || "AI 正在倾听讨论…"}</span>
-                  </div>
+            <section className="sidebar-section chat-section">
+              <div className="section-title">
+                <div>
+                  <MessageCircleQuestion size={16} />
+                  <strong>讨论消息</strong>
                 </div>
-                {planning?.routeVariants && planning.routeVariants.length > 0 ? (
-                  <>
-                    <div className="route-variant-list">
-                      {planning.routeVariants.map((variant) => (
-                        <button
-                          className={variant.id === selectedVariant?.id ? "is-active" : ""}
-                          key={variant.id}
-                          onClick={() => {
-                            void patchPlanning({
-                              selectedVariantId: variant.id,
-                              waypoints: normalizeWaypoints(variant.waypoints),
-                            });
-                            setSelectedWpId(null);
-                          }}
-                          type="button"
-                        >
-                          <span
-                            className="route-color"
-                            style={{ background: variant.id === selectedVariant?.id ? "#7167f6" : "#d7d9e8" }}
-                          />
-                          <span>
-                            <strong>{variant.name}</strong>
-                            <small>{variant.description}</small>
-                          </span>
-                          {variant.id === selectedVariant?.id ? (
-                            <Check size={15} />
-                          ) : (
-                            <ChevronRight size={15} />
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="consensus-meta" style={{ marginTop: 12 }}>
-                      <span>
-                        <Clock3 size={14} />
-                        {routedVariant?.totalDurationText || "时间待计算"}
-                      </span>
-                      <span>
-                        <Route size={14} />
-                        {routedVariant?.totalDistanceText || "距离待计算"}
-                      </span>
-                      <span>
-                        <Flag size={14} />
-                        {routedVariant?.totalCostText || "费用待计算"}
-                      </span>
-                    </div>
-                    <div className="route-steps">
-                      {(routedVariant?.waypoints || [])
-                        .sort((a, b) => a.order - b.order)
-                        .map((wp, idx) => {
-                          const resolved = waypointResolver.waypoints.find((rw) => rw.id === wp.id);
-                          const segment = routedVariant?.segments[idx - 1];
-                          return (
-                            <div
-                              key={wp.id}
-                              className={"final-timeline-item" + (resolved?.resolveStatus === "ready" ? " is-resolved" : "")}
-                              onClick={() => {
-                                setSelectedWpId(wp.id);
-                                showNotice("已查看 " + wp.name);
-                              }}
-                              style={{ cursor: "pointer" }}
-                            >
-                              <b style={{ background: "#7167f6" }}>{idx + 1}</b>
-                              <div>
-                                <strong>{wp.name}</strong>
-                                <small>
-                                  {idx > 0
-                                    ? `${segment?.modeLabel || "交通"} · ${segment?.durationText || "时间待计算"} · ${segment?.distanceText || "距离待计算"}`
-                                    : resolved?.address || wp.description || "路线起点"}
-                                </small>
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  </>
-                ) : (
-                  <div className="route-steps-empty" style={{ padding: 20, textAlign: "center", color: "#888" }}>
-                    <p>{agentThinking ? "AI 正在思考路线…" : "开始讨论吧，AI 会生成路线"}</p>
+                <span className="chat-count">
+                  {conversation?.recentTurns.length ?? 0} 条
+                </span>
+              </div>
+              <div className="chat-messages">
+                {conversation?.recentTurns.length === 0 ? (
+                  <div className="chat-empty">
+                    <span>还没有消息，在下方输入框开始讨论吧</span>
                   </div>
+                ) : (
+                  conversation?.recentTurns.slice(-20).map((turn) => (
+                    <div key={turn.id} className="chat-message">
+                      <span
+                        className="chat-avatar"
+                        style={{ "--avatar-color": displayMembers.find(m => m.id === turn.userId)?.color || "#75a7e8" } as CSSProperties}
+                      >
+                        {turn.userName.slice(0, 1)}
+                      </span>
+                      <div className="chat-bubble">
+                        <small>{turn.userName}</small>
+                        <p>{turn.text}</p>
+                      </div>
+                    </div>
+                  ))
                 )}
-              </section>
+              </div>
+            </section>
+
+            {(error || !trtcReady || trtcVoice.error) && (
+              <div className={`room-service-alert ${error ? "" : "is-muted"}`}>
+                <ShieldCheck size={14} />
+                <span>
+                  {trtcVoice.error
+                    ? trtcVoice.error
+                    : error
+                    ? "房间同步暂时不稳定，页面会继续自动重试。"
+                    : "TRTC 语音尚未配置，当前先运行房间协作与高德地图 Demo。"}
+                </span>
+              </div>
             )}
+
+            <section className="sidebar-section member-section">
+              <div className="section-title">
+                <div>
+                  <UsersRound size={16} />
+                  <strong>房间成员</strong>
+                </div>
+                <button onClick={() => setShareOpen(true)} type="button">
+                  邀请
+                </button>
+              </div>
+              <div className="member-list">
+                {displayMembers.map((item) => (
+                  <div
+                    className={`member-row ${
+                      item.isOnline ? "" : "is-offline"
+                    }`}
+                    key={item.id}
+                  >
+                    <span
+                      className={`member-avatar ${
+                        item.isSpeaking ? "is-speaking" : ""
+                      }`}
+                      style={
+                        { "--avatar-color": item.color } as CSSProperties
+                      }
+                    >
+                      {item.initials}
+                    </span>
+                    <span>
+                      <strong>{item.name}</strong>
+                      <small>{memberStatus(item)}</small>
+                    </span>
+                    {item.isHost ? (
+                      <Crown size={14} />
+                    ) : item.isMuted ? (
+                      <MicOff size={14} />
+                    ) : (
+                      <AudioLines size={14} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
           </div>
         </aside>
 
@@ -877,9 +638,9 @@ export function RoomWorkspace() {
         <aside className="route-sidebar">
             <div className="map-route-panel-header">
               <Route size={16} />
-              <strong>路线</strong>
+              <strong>行程单</strong>
               {planning?.routeVariants && planning.routeVariants.length > 0 ? (
-                <span>{planning.routeVariants.length} 个方案</span>
+                <span>{planning.routeVariants[0]?.name || "方案"}</span>
               ) : (
                 <button
                   className="map-route-trigger-btn"
@@ -894,29 +655,6 @@ export function RoomWorkspace() {
             </div>
             {planning?.routeVariants && planning.routeVariants.length > 0 ? (
               <>
-                <div className="map-route-variants">
-                  {planning.routeVariants.map((variant) => (
-                    <button
-                      className={`map-route-variant-btn ${variant.id === selectedVariant?.id ? "is-active" : ""}`}
-                      key={variant.id}
-                      onClick={() => {
-                        void patchPlanning({
-                          selectedVariantId: variant.id,
-                          waypoints: normalizeWaypoints(variant.waypoints),
-                        });
-                        setSelectedWpId(null);
-                      }}
-                      type="button"
-                    >
-                      <span className="variant-dot" style={{ background: variant.id === selectedVariant?.id ? "#7167f6" : "#d7d9e8" }} />
-                      <span className="variant-info">
-                        <strong>{variant.name}</strong>
-                        <small>{variant.description}</small>
-                      </span>
-                      {variant.id === selectedVariant?.id && <Check size={14} />}
-                    </button>
-                  ))}
-                </div>
                 {routedVariant && (
                   <div className="map-route-details">
                     <div className="map-route-metrics">
@@ -978,7 +716,7 @@ export function RoomWorkspace() {
               <div className="map-route-empty">
                 <Compass size={32} />
                 <p>开始讨论旅行计划</p>
-                <small>点击上方"生成路线"，AI 会根据讨论内容规划 3 条可选路线</small>
+                <small>AI 会根据讨论内容自动规划路线</small>
               </div>
             )}
         </aside>
@@ -988,55 +726,41 @@ export function RoomWorkspace() {
         <div className="call-dock-left">
           <span className="call-duration">
             <i />
-            协作同步中 · {onlineMembers.length} 人在线
+            协作同步中 · {onlineMembers.length}/{room?.participantLimit ?? 5} 人在线
           </span>
           <span className="call-separator" />
           <span className="call-room-code">房间码 {room?.code || code}</span>
         </div>
-        <div className="call-controls">
-          <button
-            aria-label={muted ? "打开麦克风" : "关闭麦克风"}
-            className={`call-control ${muted ? "is-danger" : "is-primary"}`}
-            onClick={handleMicClick}
-            type="button"
-          >
-            {muted ? <MicOff size={20} /> : <Mic2 size={20} />}
-            <span>
-              {speech.isListening
-                ? speech.interimText || "语音识别中"
-                : trtcVoice.isConnected
-                  ? muted
-                    ? "打开麦克风"
-                    : "麦克风已开"
-                  : voiceLabel}
-            </span>
-          </button>
-          <button
-            className="call-control"
-            onClick={() => {
-              if (trtcVoice.isConnected) {
-                void trtcVoice.leave();
-                showNotice("已断开语音。");
-                return;
+        <div className="message-input-area">
+          <input
+            className="message-input"
+            disabled={sendingMessage}
+            onChange={(e) => setMessageText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void handleSendMessage();
               }
-              if (trtcReady) {
-                void trtcVoice.join();
-                return;
-              }
-              showNotice("配置 TRTC 后即可加入真实语音。");
             }}
+            placeholder="输入消息参与讨论..."
+            type="text"
+            value={messageText}
+          />
+          <button
+            className="message-send-btn"
+            disabled={!messageText.trim() || sendingMessage}
+            onClick={() => void handleSendMessage()}
             type="button"
           >
-            <Headphones size={20} />
-            <span suppressHydrationWarning>{trtcVoice.isConnected ? "断开语音" : voiceLabel}</span>
+            <ArrowRight size={18} />
           </button>
-          
+        </div>
+        <div className="call-controls">
           <button className="call-control leave" onClick={leaveRoom} type="button">
             <DoorOpen size={20} />
             <span>离开</span>
           </button>
         </div>
-        
       </footer>
 
       <ShareDialog
