@@ -5189,11 +5189,109 @@ a {
   justify-content: center;
   color: #ccc;
   pointer-events: none;
+  z-index: 2;
 }
 .map-empty-hint p {
   margin-top: 12px;
   font-size: 16px;
   font-weight: 500;
+}
+
+/* ===== Fallback Map Placeholder ===== */
+.fallback-map {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+}
+.fallback-map svg {
+  width: 100%;
+  height: 100%;
+}
+.map-canvas.has-real-map .fallback-map {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ===== Map Overlays ===== */
+.map-loading-overlay,
+.map-error-overlay,
+.map-nokey-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  pointer-events: none;
+}
+.map-loading-overlay {
+  background: rgba(245, 243, 237, 0.85);
+  backdrop-filter: blur(2px);
+  color: var(--ink-500);
+  gap: 10px;
+}
+.map-loading-overlay p {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+.map-spinner {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.map-error-overlay {
+  background: rgba(255, 255, 255, 0.92);
+  color: #ef4444;
+  gap: 10px;
+}
+.map-error-overlay p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-700);
+}
+.map-error-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 14px;
+  border: 1px solid var(--ink-200);
+  border-radius: 8px;
+  background: var(--white);
+  color: var(--ink-700);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: all 0.15s ease;
+}
+.map-error-retry:hover {
+  background: var(--ink-50);
+  border-color: var(--ink-300);
+}
+.map-nokey-hint {
+  background: rgba(255, 255, 255, 0.0);
+  color: var(--ink-600);
+  gap: 8px;
+  text-align: center;
+  padding: 20px;
+}
+.map-nokey-hint p {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-700);
+  line-height: 1.6;
+}
+.map-nokey-hint p span {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink-500);
 }
 .map-route-empty {
   display: flex;
@@ -5596,4 +5694,306 @@ a {
 @keyframes ai-breathe {
   0%, 100% { opacity: 0.4; transform: scale(1); }
   50% { opacity: 1; transform: scale(1.3); }
+}
+
+/* ===== MapCanvas panel additional classes ===== */
+.map-detail-panel-v2-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: #9ca3af;
+}
+.map-detail-panel-v2-empty p {
+  margin: 8px 0 4px;
+  font-size: 14px;
+}
+.map-detail-panel-v2-empty span {
+  font-size: 12px;
+}
+.v2-skeleton-hero {
+  height: 120px;
+  background: #e5e7eb;
+  border-radius: 12px;
+  margin-bottom: 12px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+.v2-skeleton-title {
+  height: 16px;
+  width: 60%;
+  background: #e5e7eb;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+.v2-skeleton-line.short {
+  width: 40%;
+}
+.v2-tag {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.v2-info-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: #4b5563;
+}
+.v2-info-row svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #9ca3af;
+}
+.map-detail-panel-v2-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.map-detail-panel-v2-title-row h3 {
+  font-size: 17px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0;
+}
+
+/* ===== TripRecorder - 录音笔模式 ===== */
+
+/* 录音按钮 */
+.recorder-control {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 16px;
+}
+.recorder-btn-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.recorder-btn {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 2px solid #ef4444;
+  background: white;
+  color: #ef4444;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 200ms ease;
+  position: relative;
+  z-index: 2;
+}
+.recorder-btn:hover {
+  background: #fef2f2;
+  transform: scale(1.05);
+}
+.recorder-btn.is-recording {
+  background: #ef4444;
+  color: white;
+  border-color: #ef4444;
+}
+.recorder-btn.is-recording:hover {
+  background: #dc2626;
+}
+.recorder-pulse-ring {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 2px solid #ef4444;
+  z-index: 1;
+}
+.recorder-pulse-ring.is-active {
+  animation: recorder-pulse 1.5s ease-out infinite;
+}
+@keyframes recorder-pulse {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+.recorder-label {
+  font-size: 13px;
+  color: #6b7280;
+  text-align: center;
+}
+.recorder-label.is-recording {
+  color: #ef4444;
+  font-weight: 500;
+}
+
+/* 语音提示和错误 */
+.recorder-hint {
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
+  padding: 0 16px;
+  min-height: 18px;
+}
+.recorder-hint.is-error {
+  color: #ef4444;
+}
+
+/* 讨论记录区 */
+.transcript-section {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px 16px;
+}
+.transcript-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 12px;
+  padding-top: 8px;
+}
+.transcript-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.transcript-empty {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 13px;
+  padding: 24px 8px;
+}
+.transcript-entry {
+  background: #f9fafb;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.transcript-entry-time {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 4px;
+}
+.transcript-entry-text {
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.5;
+}
+.transcript-entry-text.is-interim {
+  color: #9ca3af;
+}
+.transcript-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  margin-top: 8px;
+}
+.transcript-clear:hover {
+  color: #ef4444;
+}
+
+/* 城市选择 */
+.city-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #4b5563;
+  background: #f3f4f6;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.city-selector:hover {
+  background: #e5e7eb;
+}
+
+/* 录音笔布局适配 */
+.recorder-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #fbfaf7;
+}
+.recorder-page .workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid #e5e7eb;
+  background: white;
+}
+.recorder-page .workspace-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.recorder-page .workspace-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.recorder-page .workspace-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.recorder-page .recorder-sidebar {
+  width: 320px;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #e5e7eb;
+  background: white;
+  overflow: hidden;
+}
+.recorder-page .map-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+.recorder-page .itinerary-sidebar {
+  width: 280px;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #e5e7eb;
+  background: white;
+  overflow: hidden;
+}
+
+/* 重新生成按钮 */
+.regenerate-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px;
+  font-size: 13px;
+  color: #7c3aed;
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+.regenerate-btn:hover:not(:disabled) {
+  background: #ede9fe;
+}
+.regenerate-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }

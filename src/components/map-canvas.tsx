@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Layers3, Navigation2, Star, Clock, MapPin, X, Banknote } from "lucide-react";
+import { Layers3, Navigation2, Star, Clock, MapPin, X, Banknote, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import type { Waypoint } from "@/lib/types";
 
 type MapCanvasProps = {
@@ -50,9 +50,10 @@ export function MapCanvas({
   const fitViewOnceRef = useRef<number>(0);
   const jsKey = process.env.NEXT_PUBLIC_AMAP_JS_KEY;
   const securityJsCode = process.env.NEXT_PUBLIC_AMAP_SECURITY_JS_CODE;
+  const hasKey = Boolean(jsKey && jsKey.length > 0);
 
   useEffect(() => {
-    if (mapInitRef.current || !jsKey || !mapRef.current) return;
+    if (mapInitRef.current || !hasKey || !mapRef.current) return;
     mapInitRef.current = true;
     setRealMapState("disabled");
 
@@ -101,7 +102,7 @@ export function MapCanvas({
       }
     }
     void initMap();
-  }, []);
+  }, [hasKey, jsKey, securityJsCode]);
 
   // Update markers/polyline when waypoints change
   useEffect(() => {
@@ -187,6 +188,16 @@ export function MapCanvas({
     if (map) { map.setZoom(z); }
   };
 
+  // Sync selectedWaypointId from parent to internal selectedWp
+  useEffect(() => {
+    if (!selectedWaypointId) {
+      setSelectedWp(null);
+      return;
+    }
+    const wp = waypoints.find((w) => w.id === selectedWaypointId);
+    if (wp) setSelectedWp(wp);
+  }, [selectedWaypointId, waypoints]);
+
   // Determine hero image source
   const heroImage = selectedWp
     ? (selectedWp.photoUrl || selectedWp.photos?.[0]?.url)
@@ -202,48 +213,155 @@ export function MapCanvas({
         ref={mapRef}
       />
 
-      {/* SVG decorative path - only shown when real map is not loaded */}
-      {realMapState !== "ready" && resolvedWaypoints.length >= 2 && (
-        <svg className="route-svg" viewBox="0 0 840 660" aria-hidden="true">
-          <path
-            className="route-active"
-            d={resolvedWaypoints
-              .map((wp, i) =>
-                i === 0
-                  ? `M${40 + i * 30} ${50 + (i % 3) * 30}`
-                  : `L${40 + i * 30} ${50 + (i % 3) * 30}`,
-              )
-              .join(" ")}
-            style={{ stroke: "#7167f6" }}
-          />
-        </svg>
+      {/* Fallback map when AMap is not available */}
+      {realMapState !== "ready" && (
+        <div className="fallback-map" aria-hidden="true">
+          <svg viewBox="0 0 800 600" preserveAspectRatio="xMidYMid slice">
+            {/* Background */}
+            <rect width="800" height="600" fill="#f5f3ed" />
+
+            {/* Grid lines */}
+            <defs>
+              <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#e8e5dc" strokeWidth="0.5" />
+              </pattern>
+            </defs>
+            <rect width="800" height="600" fill="url(#grid)" />
+
+            {/* Water areas */}
+            <ellipse cx="680" cy="120" rx="140" ry="90" fill="#dceeed" opacity="0.7" />
+            <ellipse cx="120" cy="480" rx="100" ry="70" fill="#dceeed" opacity="0.5" />
+
+            {/* Park / green areas */}
+            <ellipse cx="220" cy="160" rx="80" ry="60" fill="#e8f0e4" opacity="0.6" />
+            <ellipse cx="600" cy="420" rx="110" ry="80" fill="#e8f0e4" opacity="0.5" />
+
+            {/* Roads */}
+            <g stroke="#ddd8cc" strokeWidth="2" fill="none" strokeLinecap="round">
+              <path d="M 0 300 Q 200 280 400 320 T 800 300" />
+              <path d="M 400 0 Q 420 200 380 400 T 400 600" />
+              <path d="M 0 150 L 800 180" strokeDasharray="6 6" />
+              <path d="M 200 0 L 180 600" strokeDasharray="6 6" />
+              <path d="M 600 0 L 620 600" strokeDasharray="6 6" />
+              <path d="M 0 450 Q 300 420 500 480 T 800 440" />
+            </g>
+
+            {/* Main route path */}
+            <path
+              d="M 280 380 Q 360 300 440 260 T 580 180"
+              fill="none"
+              stroke="#7167f6"
+              strokeWidth="3"
+              strokeDasharray="8 6"
+              strokeLinecap="round"
+              opacity="0.6"
+            />
+
+            {/* Decorative road labels */}
+            <text x="420" y="20" fill="#c4bfb3" fontSize="9" fontWeight="600" transform="rotate(2 420 20)">情侣中路</text>
+            <text x="20" y="295" fill="#c4bfb3" fontSize="9" fontWeight="600">海滨路</text>
+            <text x="640" y="20" fill="#c4bfb3" fontSize="9" fontWeight="600">景山路</text>
+
+            {/* City name */}
+            <text
+              x="400"
+              y="200"
+              textAnchor="middle"
+              fill="#d3cfc5"
+              fontSize="72"
+              fontWeight="800"
+              letterSpacing="8"
+              style={{ fontFamily: "var(--font-sans), sans-serif" }}
+            >
+              珠海
+            </text>
+            <text
+              x="400"
+              y="235"
+              textAnchor="middle"
+              fill="#c4bfb3"
+              fontSize="11"
+              fontWeight="600"
+              letterSpacing="3"
+            >
+              ZHUHAI
+            </text>
+
+            {/* Sample markers */}
+            <g transform="translate(280, 380)">
+              <circle r="18" fill="#7167f6" opacity="0.15" />
+              <circle r="8" fill="#7167f6" />
+              <text y="3" textAnchor="middle" fill="#fff" fontSize="9" fontWeight="700">1</text>
+            </g>
+            <g transform="translate(440, 260)">
+              <circle r="18" fill="#ff8c65" opacity="0.15" />
+              <circle r="8" fill="#ff8c65" />
+              <text y="3" textAnchor="middle" fill="#fff" fontSize="9" fontWeight="700">2</text>
+            </g>
+            <g transform="translate(580, 180)">
+              <circle r="18" fill="#24b59f" opacity="0.15" />
+              <circle r="8" fill="#24b59f" />
+              <text y="3" textAnchor="middle" fill="#fff" fontSize="9" fontWeight="700">3</text>
+            </g>
+
+            {/* Compass */}
+            <g transform="translate(720, 520)">
+              <circle r="22" fill="#fff" stroke="#e8e5dc" strokeWidth="1.5" />
+              <polygon points="0,-14 -4,4 0,2 4,4" fill="#ef4444" />
+              <polygon points="0,14 -4,-4 0,-2 4,-4" fill="#9aa2b2" />
+              <text y="-17" textAnchor="middle" fill="#9aa2b2" fontSize="7" fontWeight="700">N</text>
+            </g>
+
+            {/* Scale bar */}
+            <g transform="translate(60, 540)">
+              <rect x="0" y="0" width="60" height="4" fill="#fff" rx="2" />
+              <rect x="0" y="0" width="30" height="4" fill="#c4bfb3" rx="2" />
+              <text x="30" y="16" textAnchor="middle" fill="#9aa2b2" fontSize="8" fontWeight="600">1 km</text>
+            </g>
+          </svg>
+        </div>
       )}
 
-      {/* Waypoint markers (fallback when no Amap) */}
-      {realMapState !== "ready" &&
-        resolvedWaypoints.map((wp, index) => (
+      {/* Loading overlay */}
+      {realMapState === "loading" && (
+        <div className="map-loading-overlay">
+          <Loader2 size={28} className="map-spinner" />
+          <p>正在加载地图…</p>
+        </div>
+      )}
+
+      {/* Error overlay */}
+      {realMapState === "error" && (
+        <div className="map-error-overlay">
+          <AlertCircle size={28} />
+          <p>地图加载失败</p>
           <button
-            className={`map-poi ${wp.id === selectedWaypointId ? "is-selected" : ""}`}
-            key={wp.id}
+            className="map-error-retry"
             onClick={() => {
-              onSelectWaypoint(wp.id);
-              setSelectedWp(wp);
+              mapInitRef.current = false;
+              setRealMapState("disabled");
             }}
-            style={{
-              left: `${20 + (index % 5) * 15}%`,
-              top: `${30 + (index % 4) * 15}%`,
-              "--poi-accent": COLORS[index % COLORS.length],
-            } as React.CSSProperties}
             type="button"
           >
-            <span className="map-poi-pin">{index + 1}</span>
-            <span className="map-poi-label">
-              <strong>{wp.name}</strong>
-            </span>
+            <RefreshCw size={12} />
+            重试
           </button>
-        ))}
+        </div>
+      )}
 
-      {resolvedWaypoints.length === 0 && (
+      {/* No-key hint overlay */}
+      {realMapState === "disabled" && !hasKey && (
+        <div className="map-nokey-hint">
+          <MapPin size={20} />
+          <p>
+            地图服务需配置高德 API Key
+            <br />
+            <span>请在 .env.local 中设置 NEXT_PUBLIC_AMAP_JS_KEY</span>
+          </p>
+        </div>
+      )}
+
+      {realMapState !== "ready" && resolvedWaypoints.length === 0 && (
         <div className="map-empty-hint">
           <Navigation2 size={32} />
           <p>等待 AI 规划路线…</p>
@@ -347,11 +465,12 @@ export function MapCanvas({
         </div>
       )}
 
-      <div className="map-mode-switch" role="group" aria-label="地图模式">
-        <button className={mapMode === "map" ? "is-active" : ""} onClick={() => changeMode("map")} type="button">标准</button>
-        <button className={mapMode === "satellite" ? "is-active" : ""} onClick={() => changeMode("satellite")} type="button">卫星</button>
-
-      </div>
+      {realMapState === "ready" && (
+        <div className="map-mode-switch" role="group" aria-label="地图模式">
+          <button className={mapMode === "map" ? "is-active" : ""} onClick={() => changeMode("map")} type="button">标准</button>
+          <button className={mapMode === "satellite" ? "is-active" : ""} onClick={() => changeMode("satellite")} type="button">卫星</button>
+        </div>
+      )}
 
 
     </section>
