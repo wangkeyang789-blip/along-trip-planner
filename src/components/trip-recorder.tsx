@@ -19,7 +19,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useWebSpeech } from "@/hooks/use-web-speech";
-import { useMediaRecorder } from "@/hooks/use-media-recorder";
+import { useXfyunRealtimeASR } from "@/hooks/use-xfyun-asr";
 import { useWaypointResolver } from "@/hooks/use-amap-data";
 import { useRouteVariantRouting } from "@/hooks/use-route-variant-routing";
 import { MapCanvas } from "@/components/map-canvas";
@@ -66,7 +66,7 @@ const CITIES = ["珠海", "北京", "上海", "杭州", "厦门"];
 
 export function TripRecorder() {
   const speech = useWebSpeech();
-  const mediaRecorder = useMediaRecorder();
+  const asr = useXfyunRealtimeASR();
 
   const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
   const [currentTranscript, setCurrentTranscript] = useState("");
@@ -77,67 +77,6 @@ export function TripRecorder() {
   const [notice, setNotice] = useState<string | null>(null);
   const [mediaText, setMediaText] = useState("");
   const [showTextInput, setShowTextInput] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
-  const [transcribeError, setTranscribeError] = useState<string | null>(null);
-
-  /* -------------------- Real-time transcript -------------------- */
-
-  useEffect(() => {
-    if (speech.isListening) {
-      setCurrentTranscript(speech.transcript);
-    }
-  }, [speech.transcript, speech.isListening]);
-
-  /* -------------------- Auto ASR transcription -------------------- */
-
-  useEffect(() => {
-    if (!mediaRecorder.isStopped || !mediaRecorder.audioBlob) return;
-    if (isTranscribing) return;
-
-    setIsTranscribing(true);
-    setTranscribeError(null);
-
-    const transcribe = async () => {
-      try {
-        const formData = new FormData();
-        formData.append("file", mediaRecorder.audioBlob!, "audio.webm");
-
-        const response = await fetch("/api/ai/transcribe", {
-          method: "POST",
-          body: formData,
-        });
-
-        const data = (await response.json().catch(() => ({}))) as {
-          text?: string;
-          error?: string;
-        };
-
-        if (response.ok && data.text) {
-          setTranscriptLog((prev) => [
-            ...prev,
-            {
-              id: generateId(),
-              time: formatTime(new Date()),
-              text: data.text!,
-            },
-          ]);
-          showNotice("语音转写完成");
-          void requestPlan();
-        } else {
-          setTranscribeError(data.error || "转写失败，请手动输入");
-          showNotice("语音转写失败");
-        }
-      } catch (err) {
-        console.warn("[Transcribe] failed:", err);
-        setTranscribeError("转写服务异常，请手动输入");
-        showNotice("语音转写失败");
-      } finally {
-        setIsTranscribing(false);
-      }
-    };
-
-    void transcribe();
-  }, [mediaRecorder.isStopped, mediaRecorder.audioBlob]);
 
   /* -------------------- Notice helper -------------------- */
 
@@ -148,43 +87,54 @@ export function TripRecorder() {
     }, 2200);
   }, []);
 
+  /* -------------------- Real-time transcript -------------------- */
+
+  useEffect(() => {
+    if (speech.isListening) {
+      setCurrentTranscript(speech.transcript);
+    }
+  }, [speech.transcript, speech.isListening]);
+
+  /* -------------------- Xfyun ASR completed handler -------------------- */
+
+  useEffect(() => {
+    if (asr.status === "completed" && asr.transcript.trim()) {
+      const text = asr.transcript.trim();
+      setTranscriptLog((prev) => [
+        ...prev,
+        {
+          id: generateId(),
+          time: formatTime(new Date()),
+          text,
+        },
+      ]);
+      showNotice("语音转写完成");
+      // Defer requestPlan to avoid circular dependency / TDZ issues
+      setTimeout(() => {
+        const logText = transcriptLog.map((t) => t.text).join("\n");
+        const allText = logText + "\n" + text;
+        if (allText.trim().length >= 10) {
+          void requestPlan();
+        }
+      }, 0);
+      asr.clear();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asr.status, asr.transcript]);
+
   /* -------------------- Recording control -------------------- */
 
-  // MediaRecorder + SiliconFlow ASR is the preferred default path.
-  // Web Speech is only used when explicitly supported AND the network probe passed.
-  const speechAvailable = false;
-
   const toggleRecording = useCallback(() => {
-    if (speechAvailable) {
-      if (speech.isListening) {
-        speech.stop();
-        if (currentTranscript.trim()) {
-          setTranscriptLog((prev) => [
-            ...prev,
-            {
-              id: generateId(),
-              time: formatTime(new Date()),
-              text: currentTranscript.trim(),
-            },
-          ]);
-          setCurrentTranscript("");
-        }
-        void requestPlan();
-      } else {
-        speech.clear();
-        setCurrentTranscript("");
-        speech.start();
-      }
+    if (asr.status === "recording" || asr.status === "connecting") {
+      asr.stop();
+    } else if (asr.status === "finalizing") {
+      // Wait for final results; do nothing
+    } else if (asr.status === "completed" || asr.status === "error") {
+      asr.clear();
     } else {
-      if (mediaRecorder.isRecording) {
-        mediaRecorder.stop();
-      } else if (mediaRecorder.isStopped) {
-        mediaRecorder.clear();
-      } else {
-        mediaRecorder.start();
-      }
+      asr.start();
     }
-  }, [speech, speechAvailable, currentTranscript, mediaRecorder]);
+  }, [asr]);
 
   const submitMediaText = useCallback(() => {
     const text = mediaText.trim();
@@ -258,9 +208,9 @@ export function TripRecorder() {
     setMediaText("");
     setShowTextInput(false);
     speech.clear();
-    mediaRecorder.clear();
+    asr.clear();
     showNotice("已清空记录");
-  }, [speech, mediaRecorder, showNotice]);
+  }, [speech, asr, showNotice]);
 
   /* -------------------- Waypoint resolution -------------------- */
 
@@ -342,35 +292,37 @@ export function TripRecorder() {
           {/* Recording control */}
           <div className="recorder-control">
             <button
-              className={`recorder-btn ${speech.isListening || mediaRecorder.isRecording ? "is-recording" : ""}`}
+              className={`recorder-btn ${asr.status === "recording" || asr.status === "connecting" ? "is-recording" : ""}`}
               onClick={toggleRecording}
               type="button"
               aria-label={
-                speech.isListening || mediaRecorder.isRecording
+                asr.status === "recording" || asr.status === "connecting"
                   ? "停止录音"
-                  : speechAvailable
-                    ? "开始录音"
-                    : mediaRecorder.isStopped
-                      ? "重新录音"
-                      : "开始录音"
+                  : asr.status === "completed" || asr.status === "error"
+                    ? "重新录音"
+                    : "开始录音"
               }
             >
-              {speech.isListening || mediaRecorder.isRecording ? (
+              {asr.status === "recording" || asr.status === "connecting" ? (
                 <Square size={28} />
               ) : (
                 <Mic size={32} />
               )}
             </button>
             <p className="recorder-label">
-              {speech.isListening
-                ? "正在实时转写…"
-                : mediaRecorder.isRecording
-                  ? `录音中 ${Math.floor(mediaRecorder.duration / 60).toString().padStart(2, "0")}:${(mediaRecorder.duration % 60).toString().padStart(2, "0")}`
-                  : "点击录制音频备忘"}
+              {asr.status === "connecting"
+                ? "连接中…"
+                : asr.status === "recording"
+                  ? "正在实时转写…"
+                  : asr.status === "finalizing"
+                    ? "转写收尾中…"
+                    : asr.status === "error"
+                      ? "转写出错"
+                      : "点击录制音频备忘"}
             </p>
-            {speech.error && speechAvailable && (
+            {asr.error && (
               <p className="recorder-hint error">
-                {speech.error}
+                {asr.error}
                 <button
                   className="recorder-fallback-link"
                   onClick={() => setShowTextInput(true)}
@@ -380,10 +332,9 @@ export function TripRecorder() {
                 </button>
               </p>
             )}
-            {speech.hint && speechAvailable && <p className="recorder-hint">{speech.hint}</p>}
-            {!speechAvailable && !mediaRecorder.isRecording && (
+            {asr.status === "idle" && (
               <p className="recorder-hint">
-                录制完成后 AI 会自动转写为文字。
+                点击按钮开始实时语音转写。
                 {!showTextInput && (
                   <button
                     className="recorder-fallback-link"
@@ -395,39 +346,10 @@ export function TripRecorder() {
                 )}
               </p>
             )}
-
-            {/* MediaRecorder audio playback + ASR */}
-            {mediaRecorder.isStopped && mediaRecorder.audioUrl && (
-              <div className="recorder-media-playback">
-                <audio src={mediaRecorder.audioUrl} controls style={{ width: "100%", height: 32 }} />
-
-                {isTranscribing && (
-                  <p className="recorder-hint">
-                    <span className="recorder-spinner" />
-                    正在通过 AI 转写语音…
-                  </p>
-                )}
-
-                {transcribeError && !isTranscribing && (
-                  <>
-                    <p className="recorder-hint error">{transcribeError}</p>
-                    <div className="recorder-media-input">
-                      <input
-                        type="text"
-                        placeholder="手动输入讨论内容，按回车发送…"
-                        value={mediaText}
-                        onChange={(e) => setMediaText(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") submitMediaText();
-                        }}
-                      />
-                      <button onClick={submitMediaText} type="button">
-                        <Sparkles size={14} />
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
+            {(asr.status === "recording" || asr.status === "connecting") && asr.interimText && (
+              <p className="recorder-hint">
+                <span className="recorder-interim">{asr.interimText}</span>
+              </p>
             )}
 
             {/* Text input fallback */}
@@ -482,7 +404,7 @@ export function TripRecorder() {
             </div>
 
             <div className="recorder-messages">
-              {transcriptLog.length === 0 && !speech.isListening && !mediaRecorder.isRecording ? (
+              {transcriptLog.length === 0 && asr.status !== "recording" && asr.status !== "connecting" ? (
                 <div className="recorder-empty">
                   <span>点击上方按钮开始录音，录下你和朋友的行程讨论</span>
                 </div>
@@ -504,7 +426,7 @@ export function TripRecorder() {
                       />
                     </div>
                   ))}
-                  {speech.isListening && (
+                  {(asr.status === "recording" || asr.status === "connecting") && (
                     <div className="recorder-entry is-live">
                       <span className="recorder-entry-time">[{formatTime(new Date())}]</span>
                       <div className="chat-message">
@@ -517,8 +439,8 @@ export function TripRecorder() {
                         <div className="chat-bubble">
                           <small>讨论</small>
                           <p>
-                            {speech.interimText ? (
-                              <span className="recorder-interim">{speech.interimText}</span>
+                            {asr.interimText ? (
+                              <span className="recorder-interim">{asr.interimText}</span>
                             ) : (
                               <span className="recorder-waiting">正在转写…</span>
                             )}
