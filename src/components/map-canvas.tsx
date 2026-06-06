@@ -1,7 +1,7 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Layers3, Navigation2, Star, Clock, MapPin, Phone, X } from "lucide-react";
+import { Layers3, Navigation2, Star, Clock, MapPin, X, Banknote } from "lucide-react";
 import type { Waypoint } from "@/lib/types";
 
 type MapCanvasProps = {
@@ -41,12 +41,11 @@ export function MapCanvas({
   const mapInstanceRef = useRef<any>(null);
   const amapApiRef = useRef<any>(null);
   const markersRef = useRef<any[]>([]);
-  const infoWindowRef = useRef<any>(null);
 
   // Initialize real map once
   const mapInitRef = useRef(false);
   const polylineRef = useRef<any>(null);
-  
+
   const standardLayerRef = useRef<any>(null);
   const fitViewOnceRef = useRef<number>(0);
   const jsKey = process.env.NEXT_PUBLIC_AMAP_JS_KEY;
@@ -87,6 +86,15 @@ export function MapCanvas({
         map.addControl(new AMap.ToolBar({
           position: { bottom: "84px", right: "18px" },
         }));
+
+        // Close detail panel when clicking map blank area
+        map.on("click", (e: any) => {
+          // e.target === map means clicked on blank area, not on marker/overlay
+          if (e && e.target === map) {
+            setSelectedWp(null);
+          }
+        });
+
         setRealMapState("ready");
       } catch {
         setRealMapState("error");
@@ -119,7 +127,6 @@ export function MapCanvas({
       marker.on("click", () => {
         onSelectWaypointRef.current(wp.id);
         setSelectedWp(wp);
-        showInfoWindow(map, wp, marker, index);
       });
       map.add(marker);
       markers.push(marker);
@@ -155,50 +162,6 @@ export function MapCanvas({
     }
   }, [resolvedWaypoints, routePath, mapMode]);
 
-  function showInfoWindow(map: any, wp: Waypoint, marker: any, index: number) {
-    const AMap = amapApiRef.current;
-    if (!AMap) return;
-
-    if (infoWindowRef.current) {
-      infoWindowRef.current.close();
-    }
-    var photoHtml = "";
-    if (wp.photoUrl) {
-      photoHtml = `<div class="info-photo"><img src="${wp.photoUrl}" alt="${wp.name}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;margin-bottom:8px" /></div>`;
-    } else if (wp.photos && wp.photos.length > 0) {
-      photoHtml = `<div class="info-photo"><img src="${wp.photos[0].url}" alt="${wp.name}" style="width:100%;height:120px;object-fit:cover;border-radius:6px;margin-bottom:8px" /></div>`;
-    }
-    var ratingHtml = wp.rating ? `<span style="display:inline-flex;align-items:center;gap:3px;color:#ff8c00;font-size:13px"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>${wp.rating}</span>` : "";
-    var hoursHtml = wp.businessHours ? `<span style="display:flex;align-items:center;gap:3px;color:#666;font-size:12px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>${wp.businessHours}</span>` : "";
-    var addressHtml = wp.address ? `<span style="display:flex;align-items:center;gap:3px;color:#666;font-size:12px;margin-top:4px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>${wp.address}</span>` : "";
-    var descHtml = wp.description ? `<p style="margin:6px 0 0;font-size:12px;color:#444;line-height:1.4">${wp.description}</p>` : "";
-
-    var infoHtml = `
-      <div style="min-width:220px;max-width:300px;font-family:-apple-system,BlinkMacSystemFont,sans-serif">
-        ${photoHtml}
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-          <strong style="font-size:15px;color:#222">${index + 1}. ${wp.name}</strong>
-          ${ratingHtml}
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px">
-          ${hoursHtml}
-          ${wp.category ? `<span style="background:#f0f0f0;padding:1px 6px;border-radius:3px;font-size:11px;color:#666">${wp.category}</span>` : ""}
-        </div>
-        ${addressHtml}
-        ${descHtml}
-      </div>
-    `;
-
-    var infoWindow = new AMap.InfoWindow({
-      content: infoHtml,
-      offset: new AMap.Pixel(0, -30),
-      size: new AMap.Size(300, 0),
-      autoMove: true,
-    });
-    infoWindow.open(map, marker.getPosition());
-    infoWindowRef.current = infoWindow;
-  }
-
   const changeMode = (mode: "map" | "satellite") => {
     setMapMode(mode);
     const map = mapInstanceRef.current;
@@ -217,12 +180,17 @@ export function MapCanvas({
     }
   };
 
-const updateZoom = (zoom: number) => {
+  const updateZoom = (zoom: number) => {
     const z = Math.max(3, Math.min(20, zoom));
     setZoomLevel(z);
     const map = mapInstanceRef.current;
     if (map) { map.setZoom(z); }
   };
+
+  // Determine hero image source
+  const heroImage = selectedWp
+    ? (selectedWp.photoUrl || selectedWp.photos?.[0]?.url)
+    : null;
 
   return (
     <section
@@ -282,56 +250,107 @@ const updateZoom = (zoom: number) => {
         </div>
       )}
 
-      {/* Selected waypoint detail panel */}
-      {selectedWp && selectedWp.resolveStatus === "ready" && (
-        <div className="map-detail-panel">
-          <div className="map-detail-header">
-            <div className="map-detail-header-left">
-              <span className="map-detail-number">#{resolvedWaypoints.findIndex(w => w.id === selectedWp.id) + 1}</span>
-              <div>
+      {/* ===== Custom Detail Panel V2 ===== */}
+      {selectedWp && (
+        <div className="map-detail-panel-v2">
+          {/* Close button */}
+          <button
+            className="map-detail-panel-v2-close"
+            onClick={() => setSelectedWp(null)}
+            type="button"
+            aria-label="关闭详情"
+          >
+            <X size={16} />
+          </button>
+
+          {/* Searching skeleton */}
+          {selectedWp.resolveStatus === "searching" && (
+            <div className="map-detail-panel-v2-skeleton">
+              <div className="v2-skeleton-hero" />
+              <div className="v2-skeleton-title" />
+              <div className="v2-skeleton-line" />
+              <div className="v2-skeleton-line short" />
+            </div>
+          )}
+
+          {/* Not found state */}
+          {selectedWp.resolveStatus === "not_found" && (
+            <div className="map-detail-panel-v2-empty">
+              <MapPin size={32} color="#ccc" />
+              <p>暂无详细信息</p>
+              <span>该地点暂时无法获取详情</span>
+            </div>
+          )}
+
+          {/* Ready state */}
+          {selectedWp.resolveStatus === "ready" && (
+            <>
+              {/* Hero image */}
+              {heroImage ? (
+                <div className="map-detail-panel-v2-hero">
+                  <img src={heroImage} alt={selectedWp.name} />
+                </div>
+              ) : (
+                <div className="map-detail-panel-v2-hero placeholder">
+                  <MapPin size={28} color="#ccc" />
+                </div>
+              )}
+
+              {/* Title + rating */}
+              <div className="map-detail-panel-v2-title-row">
                 <h3>{selectedWp.name}</h3>
                 {selectedWp.rating && (
-                  <span className="map-detail-stars">
+                  <span className="map-detail-panel-v2-rating">
                     <Star size={14} fill="#ff8c00" color="#ff8c00" />
-                    <strong>{selectedWp.rating}</strong>
-                    {selectedWp.category && <span className="map-detail-tag">{selectedWp.category}</span>}
+                    {selectedWp.rating}
                   </span>
                 )}
               </div>
-            </div>
-            <button className="map-detail-close" onClick={() => setSelectedWp(null)} type="button">
-              <X size={18} />
-            </button>
-          </div>
-          {selectedWp.photoUrl && (
-            <div className="map-detail-hero">
-              <img src={selectedWp.photoUrl} alt={selectedWp.name} />
-            </div>
+
+              {/* Tags */}
+              {selectedWp.category && (
+                <div className="map-detail-panel-v2-tags">
+                  <span className="v2-tag">{selectedWp.category}</span>
+                </div>
+              )}
+
+              {/* Info rows */}
+              <div className="map-detail-panel-v2-info">
+                {selectedWp.address && (
+                  <div className="v2-info-row">
+                    <MapPin size={14} color="#888" />
+                    <span>{selectedWp.address}</span>
+                  </div>
+                )}
+                {selectedWp.businessHours && (
+                  <div className="v2-info-row">
+                    <Clock size={14} color="#888" />
+                    <span>{selectedWp.businessHours}</span>
+                  </div>
+                )}
+                {selectedWp.cost && (
+                  <div className="v2-info-row">
+                    <Banknote size={14} color="#888" />
+                    <span>{selectedWp.cost}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Description */}
+              {selectedWp.description && (
+                <div className="map-detail-panel-v2-desc">
+                  <p>{selectedWp.description}</p>
+                </div>
+              )}
+            </>
           )}
-          <div className="map-detail-body">
-            {selectedWp.businessHours && (
-              <div className="map-detail-row">
-                <Clock size={15} />
-                <span>{selectedWp.businessHours}</span>
-              </div>
-            )}
-            {selectedWp.address && (
-              <div className="map-detail-row">
-                <MapPin size={15} />
-                <span>{selectedWp.address}</span>
-              </div>
-            )}
-            {selectedWp.description && (
-              <p className="map-detail-desc">{selectedWp.description}</p>
-            )}
-          </div>
         </div>
       )}
 
       <div className="map-mode-switch" role="group" aria-label="地图模式">
         <button className={mapMode === "map" ? "is-active" : ""} onClick={() => changeMode("map")} type="button">标准</button>
         <button className={mapMode === "satellite" ? "is-active" : ""} onClick={() => changeMode("satellite")} type="button">卫星</button>
-        
+
       </div>
 
 
