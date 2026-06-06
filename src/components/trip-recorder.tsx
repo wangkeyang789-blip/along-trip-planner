@@ -16,6 +16,7 @@ import {
   Trash2,
   ChevronDown,
   Type,
+  AlertTriangle,
 } from "lucide-react";
 import { useWebSpeech } from "@/hooks/use-web-speech";
 import { useMediaRecorder } from "@/hooks/use-media-recorder";
@@ -590,6 +591,13 @@ export function TripRecorder() {
                 </span>
               </div>
 
+              {routedVariant?.routeStatus === "partial" && (
+                <div className="map-route-partial-hint">
+                  <AlertTriangle size={12} />
+                  <span>部分路线无法规划，显示为直线连接</span>
+                </div>
+              )}
+
               <div className="map-route-segments">
                 {sortedWaypoints.map((wp, idx) => {
                   const resolved = resolvedWaypoints.find((rw) => rw.id === wp.id);
@@ -889,6 +897,18 @@ export function TripRecorder() {
         }
         @keyframes recorder-spin {
           to { transform: rotate(360deg); }
+        }
+        .map-route-partial-hint {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          margin: -6px 0 10px;
+          padding: 6px 10px;
+          border-radius: 8px;
+          background: #fff8e6;
+          color: #b38600;
+          font-size: 11px;
+          font-weight: 500;
         }
       `}</style>
     </main>
