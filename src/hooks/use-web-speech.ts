@@ -47,7 +47,7 @@ export function useWebSpeech() {
   const resultCountRef = useRef(0);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const networkErrorCountRef = useRef(0);
-  const maxNetworkRetries = useRef(15);
+  const maxNetworkRetries = useRef(3);
   const lastResultTimeRef = useRef(0);
   const [status, setStatus] = useState<SpeechStatus>("idle");
   const [supportStatus, setSupportStatus] = useState<SpeechSupportStatus>("checking");
@@ -73,7 +73,62 @@ export function useWebSpeech() {
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    setSupportStatus(SpeechRecognition ? "supported" : "unsupported");
+    if (!SpeechRecognition) {
+      setSupportStatus("unsupported");
+      return;
+    }
+
+    // Quick connectivity probe: start then stop within 500ms.
+    // If a network error fires, mark unsupported immediately so China users
+    // never see the Web Speech option.
+    let probeTimer: ReturnType<typeof setTimeout> | null = null;
+    let cleanedUp = false;
+
+    const probe = new SpeechRecognition();
+    probe.continuous = false;
+    probe.interimResults = false;
+    probe.lang = "zh-CN";
+
+    probe.onerror = (event) => {
+      if (cleanedUp) return;
+      if (event.error === "network") {
+        setSupportStatus("unsupported");
+      } else {
+        // Other errors (not-allowed, no-speech, etc.) don't imply lack of support
+        setSupportStatus("supported");
+      }
+      cleanedUp = true;
+      if (probeTimer) clearTimeout(probeTimer);
+      try { probe.stop(); } catch { /* ignore */ }
+    };
+
+    (probe as any).onstart = () => {
+      probeTimer = setTimeout(() => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        setSupportStatus("supported");
+        try { probe.stop(); } catch { /* ignore */ }
+      }, 500);
+    };
+
+    (probe as any).onend = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      if (probeTimer) clearTimeout(probeTimer);
+      setSupportStatus("supported");
+    };
+
+    try {
+      probe.start();
+    } catch {
+      setSupportStatus("unsupported");
+    }
+
+    return () => {
+      cleanedUp = true;
+      if (probeTimer) clearTimeout(probeTimer);
+      try { probe.stop(); } catch { /* ignore */ }
+    };
   }, []);
 
   const start = useCallback(() => {

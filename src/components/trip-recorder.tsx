@@ -87,6 +87,57 @@ export function TripRecorder() {
     }
   }, [speech.transcript, speech.isListening]);
 
+  /* -------------------- Auto ASR transcription -------------------- */
+
+  useEffect(() => {
+    if (!mediaRecorder.isStopped || !mediaRecorder.audioBlob) return;
+    if (isTranscribing) return;
+
+    setIsTranscribing(true);
+    setTranscribeError(null);
+
+    const transcribe = async () => {
+      try {
+        const formData = new FormData();
+        formData.append("file", mediaRecorder.audioBlob!, "audio.webm");
+
+        const response = await fetch("/api/ai/transcribe", {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = (await response.json().catch(() => ({}))) as {
+          text?: string;
+          error?: string;
+        };
+
+        if (response.ok && data.text) {
+          setTranscriptLog((prev) => [
+            ...prev,
+            {
+              id: generateId(),
+              time: formatTime(new Date()),
+              text: data.text!,
+            },
+          ]);
+          showNotice("语音转写完成");
+          void requestPlan();
+        } else {
+          setTranscribeError(data.error || "转写失败，请手动输入");
+          showNotice("语音转写失败");
+        }
+      } catch (err) {
+        console.warn("[Transcribe] failed:", err);
+        setTranscribeError("转写服务异常，请手动输入");
+        showNotice("语音转写失败");
+      } finally {
+        setIsTranscribing(false);
+      }
+    };
+
+    void transcribe();
+  }, [mediaRecorder.isStopped, mediaRecorder.audioBlob]);
+
   /* -------------------- Notice helper -------------------- */
 
   const showNotice = useCallback((message: string) => {
@@ -98,7 +149,9 @@ export function TripRecorder() {
 
   /* -------------------- Recording control -------------------- */
 
-  const speechAvailable = speech.isSupported;
+  // MediaRecorder + SiliconFlow ASR is the preferred default path.
+  // Web Speech is only used when explicitly supported AND the network probe passed.
+  const speechAvailable = false;
 
   const toggleRecording = useCallback(() => {
     if (speechAvailable) {
@@ -312,11 +365,9 @@ export function TripRecorder() {
                 ? "正在实时转写…"
                 : mediaRecorder.isRecording
                   ? `录音中 ${Math.floor(mediaRecorder.duration / 60).toString().padStart(2, "0")}:${(mediaRecorder.duration % 60).toString().padStart(2, "0")}`
-                  : speechAvailable
-                    ? "点击开始录音"
-                    : "点击录制音频备忘"}
+                  : "点击录制音频备忘"}
             </p>
-            {speech.error && !speechAvailable && (
+            {speech.error && speechAvailable && (
               <p className="recorder-hint error">
                 {speech.error}
                 <button
@@ -331,7 +382,7 @@ export function TripRecorder() {
             {speech.hint && speechAvailable && <p className="recorder-hint">{speech.hint}</p>}
             {!speechAvailable && !mediaRecorder.isRecording && (
               <p className="recorder-hint">
-                当前浏览器语音转写不可用，已切换为音频录制模式。
+                录制完成后 AI 会自动转写为文字。
                 {!showTextInput && (
                   <button
                     className="recorder-fallback-link"
@@ -344,25 +395,37 @@ export function TripRecorder() {
               </p>
             )}
 
-            {/* MediaRecorder audio playback */}
+            {/* MediaRecorder audio playback + ASR */}
             {mediaRecorder.isStopped && mediaRecorder.audioUrl && (
               <div className="recorder-media-playback">
                 <audio src={mediaRecorder.audioUrl} controls style={{ width: "100%", height: 32 }} />
-                <p className="recorder-hint">录音已保存，可播放回顾。请补充文字描述：</p>
-                <div className="recorder-media-input">
-                  <input
-                    type="text"
-                    placeholder="输入讨论内容，按回车发送…"
-                    value={mediaText}
-                    onChange={(e) => setMediaText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") submitMediaText();
-                    }}
-                  />
-                  <button onClick={submitMediaText} type="button">
-                    <Sparkles size={14} />
-                  </button>
-                </div>
+
+                {isTranscribing && (
+                  <p className="recorder-hint">
+                    <span className="recorder-spinner" />
+                    正在通过 AI 转写语音…
+                  </p>
+                )}
+
+                {transcribeError && !isTranscribing && (
+                  <>
+                    <p className="recorder-hint error">{transcribeError}</p>
+                    <div className="recorder-media-input">
+                      <input
+                        type="text"
+                        placeholder="手动输入讨论内容，按回车发送…"
+                        value={mediaText}
+                        onChange={(e) => setMediaText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") submitMediaText();
+                        }}
+                      />
+                      <button onClick={submitMediaText} type="button">
+                        <Sparkles size={14} />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -812,6 +875,20 @@ export function TripRecorder() {
         }
         .recorder-fallback-close:hover {
           color: var(--ink-700);
+        }
+        .recorder-spinner {
+          display: inline-block;
+          width: 12px;
+          height: 12px;
+          margin-right: 6px;
+          border: 2px solid var(--ink-200);
+          border-top-color: var(--violet-500);
+          border-radius: 50%;
+          animation: recorder-spin 0.8s linear infinite;
+          vertical-align: middle;
+        }
+        @keyframes recorder-spin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
     </main>
