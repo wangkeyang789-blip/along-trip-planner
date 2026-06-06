@@ -1,20 +1,37 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: in-progress
+last_updated: "2026-06-06T16:54:11.940Z"
+progress:
+  total_phases: 1
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 2
+  percent: 100
+---
+
 # Project State
 
 ## Current Position
 - **Phase:** 01
-- **Plan:** voice-input-fix
+- **Plan:** map-routing
 - **Status:** completed
 
 ## Progress
-- [x] Task 1: 改进 use-web-speech.ts — 添加 500ms 网络探测，中国网络下直接标记 unsupported
-- [x] Task 2: 修改 trip-recorder.tsx — 强制 MediaRecorder 为默认路径，更新 UI 文案
+- [x] Task 1: 改进 map-canvas.tsx 加载体验
+- [x] Task 2: 验证并修复 routePolylines 展示链路
+- [x] Task 3: 改进行程单路线展示
+- [x] Task 4: 准备 AMap Key 配置指引
+- [x] Task 5: 验证
 
 ## Decisions
-1. Hard-disable Web Speech by default (`speechAvailable = false`) to ensure consistent behavior for China users.
-2. Keep connectivity probe in use-web-speech.ts so the hook remains accurate if the flag is ever reverted.
-3. Preserve all Web Speech fallback code — no deletions, only routing decision changed.
+1. Hide map mode switch when AMap is not loaded to avoid non-functional UI.
+2. Use absolute positioned overlays for loading/error/no-key states instead of replacing fallback map.
+3. Keep SVG fallback map intact; overlays appear on top with pointer-events control.
 
 ## Blockers
 
 ## Session Log
-- 2026-06-07: Completed voice-input-fix plan. Commit 4661df2.
+- 2026-06-07: Completed map-routing plan. Commits: 9ccb947, 3e390f5, 05ae837.
