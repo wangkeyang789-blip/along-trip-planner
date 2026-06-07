@@ -1,5 +1,5 @@
-import { HomeScreen } from "@/components/home-screen";
+import { TripRecorder } from "@/components/trip-recorder";
 
 export default function HomePage() {
-  return <HomeScreen />;
+  return <TripRecorder />;
 }

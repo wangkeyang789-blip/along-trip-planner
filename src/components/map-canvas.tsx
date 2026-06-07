@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Layers3, Navigation2, Star, Clock, MapPin, X, Banknote, Loader2, AlertCircle, RefreshCw } from "lucide-react";
+import { Layers3, Navigation2, Star, Clock, MapPin, X, Banknote, Loader2, AlertCircle, RefreshCw, Plus } from "lucide-react";
 import type { Waypoint } from "@/lib/types";
+import { findPoiReview } from "@/lib/poi-reviews";
 
 type MapCanvasProps = {
   waypoints: Waypoint[];
@@ -10,9 +11,82 @@ type MapCanvasProps = {
   selectedWaypointId: string | null;
   onSelectWaypoint: (waypointId: string) => void;
   onNotify?: (message: string) => void;
+  onAddWaypoint?: (waypoint: { id: string; name: string; location: [number, number]; address?: string }) => void;
 };
 
 const COLORS = ["#7167f6", "#ff8c65", "#24b59f", "#2d7ff9", "#e64980", "#fab005"];
+
+function haversineDistance(a: [number, number], b: [number, number]): number {
+  const R = 6371000; // meters
+  const dLat = (b[1] - a[1]) * Math.PI / 180;
+  const dLon = (b[0] - a[0]) * Math.PI / 180;
+  const lat1 = a[1] * Math.PI / 180;
+  const lat2 = b[1] * Math.PI / 180;
+  const x = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.sin(dLon / 2) * Math.sin(dLon / 2) * Math.cos(lat1) * Math.cos(lat2);
+  const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  return R * c;
+}
+
+function formatDistance(meters: number): string {
+  if (meters < 1000) return `约 ${Math.round(meters)}m`;
+  return `约 ${(meters / 1000).toFixed(1)}km`;
+}
+
+function ratingLabel(rating: number): string {
+  if (rating >= 4.5) return "很好";
+  if (rating >= 4.0) return "好";
+  if (rating >= 3.0) return "一般";
+  return "较差";
+}
+
+const TRAVEL_RELEVANT_KEYWORDS = [
+  "风景", "旅游", "景点", "游览", "名胜", "古迹", "遗产",
+  "公园", "植物园", "动物园", "主题乐园", "乐园", "度假区",
+  "博物馆", "纪念馆", "展览馆", "美术馆", "图书馆", "文化",
+  "寺庙", "教堂", " Mosque ", "道观", "宗祠",
+  "古镇", "古城", "老街", "古街", "步行街", "胡同",
+  "海滩", "海滨", "海岛", "沙滩", "海湾", "海岸",
+  "山", "峰", "岭", "峡谷", "瀑布", "温泉", "湖", "湿地",
+  "餐饮", "美食", "餐厅", "小吃", "酒楼", "饭店", "面馆", "火锅", "烧烤",
+  "购物", "商场", "市集", "夜市", "商业街",
+];
+
+function isTravelRelevantPoi(poi: any): boolean {
+  const type = poi.type || "";
+  const name = poi.name || "";
+  const text = `${type};${name}`;
+  return TRAVEL_RELEVANT_KEYWORDS.some((kw) => text.includes(kw));
+}
+
+function formatReviewCount(n: number): string {
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万条评价`;
+  return `${n}条评价`;
+}
+
+function truncate(str: string, len: number): string {
+  if (!str) return "";
+  if (str.length <= len) return str;
+  return str.slice(0, len) + "...";
+}
+
+function parsePoiLocation(poi: any): [number, number] | null {
+  const loc = poi.location;
+  if (typeof loc === "string") {
+    const parts = loc.split(",");
+    const lng = Number(parts[0]);
+    const lat = Number(parts[1]);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) return [lng, lat];
+  } else if (Array.isArray(loc) && loc.length >= 2) {
+    const lng = Number(loc[0]);
+    const lat = Number(loc[1]);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) return [lng, lat];
+  } else if (loc && typeof loc === "object") {
+    const lng = Number(loc.lng ?? loc.getLng?.() ?? loc.longitude);
+    const lat = Number(loc.lat ?? loc.getLat?.() ?? loc.latitude);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) return [lng, lat];
+  }
+  return null;
+}
 
 export function MapCanvas({
   waypoints,
@@ -20,12 +94,19 @@ export function MapCanvas({
   selectedWaypointId,
   onSelectWaypoint,
   onNotify,
+  onAddWaypoint,
 }: MapCanvasProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const [mapMode, setMapMode] = useState<"map" | "satellite">("map");
   const [zoomLevel, setZoomLevel] = useState(13);
   const [realMapState, setRealMapState] = useState<"disabled" | "loading" | "ready" | "error">("disabled");
   const [selectedWp, setSelectedWp] = useState<Waypoint | null>(null);
+  const [clickedPois, setClickedPois] = useState<any[]>([]);
+  const [clickPosition, setClickPosition] = useState<[number, number] | null>(null);
+  const [clickPixel, setClickPixel] = useState<{ x: number; y: number } | null>(null);
+  const [mapContainerSize, setMapContainerSize] = useState({ width: 0, height: 0 });
+  const [heroImageIndex, setHeroImageIndex] = useState(0);
+  const geocoderRef = useRef<any>(null);
 
   const resolvedWaypoints = useMemo(
     () => waypoints.filter((wp) => wp.resolveStatus === "ready" && wp.location),
@@ -44,13 +125,18 @@ export function MapCanvas({
 
   // Initialize real map once
   const mapInitRef = useRef(false);
-  const polylineRef = useRef<any>(null);
+  const polylinesRef = useRef<any[]>([]);
 
   const standardLayerRef = useRef<any>(null);
-  const fitViewOnceRef = useRef<number>(0);
+  const lastFitHashRef = useRef<string>("");
   const jsKey = process.env.NEXT_PUBLIC_AMAP_JS_KEY;
   const securityJsCode = process.env.NEXT_PUBLIC_AMAP_SECURITY_JS_CODE;
   const hasKey = Boolean(jsKey && jsKey.length > 0);
+
+  // Reset gallery index when selected waypoint changes
+  useEffect(() => {
+    setHeroImageIndex(0);
+  }, [selectedWp?.id]);
 
   useEffect(() => {
     if (mapInitRef.current || !hasKey || !mapRef.current) return;
@@ -69,12 +155,12 @@ export function MapCanvas({
         const AMap = await load({
           key: jsKey as string,
           version: "2.0",
-          plugins: ["AMap.Scale", "AMap.ToolBar"],
+          plugins: ["AMap.Scale", "AMap.ToolBar", "AMap.Geocoder"],
         });
         if (!mapRef.current) return;
         amapApiRef.current = AMap;
         const map = new AMap.Map(mapRef.current, {
-          center: [116.397, 39.916],
+          center: [113.576677, 22.270978],
           mapStyle: "amap://styles/normal",
           resizeEnable: true,
           viewMode: "3D",
@@ -88,11 +174,29 @@ export function MapCanvas({
           position: { bottom: "84px", right: "18px" },
         }));
 
-        // Close detail panel when clicking map blank area
+        const geocoder = new AMap.Geocoder({ radius: 1000, extensions: "all" });
+        geocoderRef.current = geocoder;
+
+        // Click on map blank area: close panels and search nearby POIs
         map.on("click", (e: any) => {
-          // e.target === map means clicked on blank area, not on marker/overlay
-          if (e && e.target === map) {
-            setSelectedWp(null);
+          const lnglat = e?.lnglat;
+          const pixel = e?.pixel;
+          if (!lnglat || !pixel) return;
+          setClickedPois([]);
+          setSelectedWp(null);
+          setClickPixel({ x: pixel.x, y: pixel.y });
+          if (mapRef.current) {
+            const rect = mapRef.current.getBoundingClientRect();
+            setMapContainerSize({ width: rect.width, height: rect.height });
+          }
+          if (geocoderRef.current) {
+            geocoderRef.current.getAddress([lnglat.lng, lnglat.lat], (status: string, result: any) => {
+              if (status === "complete" && result.regeocode) {
+                const pois = (result.regeocode.pois || []).filter(isTravelRelevantPoi);
+                setClickedPois(pois.slice(0, 5));
+                setClickPosition([lnglat.lng, lnglat.lat]);
+              }
+            });
           }
         });
 
@@ -111,11 +215,9 @@ export function MapCanvas({
     if (!map || !AMap) return;
     markersRef.current.forEach((m: any) => { try { map.remove(m); } catch {} });
     markersRef.current = [];
-    if (polylineRef.current) {
-      try { map.remove(polylineRef.current); } catch {}
-      polylineRef.current = null;
-    }
-    if (resolvedWaypoints.length === 0) { fitViewOnceRef.current = 0; return; }
+    polylinesRef.current.forEach((p: any) => { try { map.remove(p); } catch {} });
+    polylinesRef.current = [];
+    if (resolvedWaypoints.length === 0) { lastFitHashRef.current = ""; return; }
 
     const markers: any[] = [];
     resolvedWaypoints.forEach((wp, index) => {
@@ -131,6 +233,15 @@ export function MapCanvas({
       });
       map.add(marker);
       markers.push(marker);
+      // Also bind DOM click for testing / programmatic access
+      const markerDom = marker.getContentDom?.() || marker.getContent?.();
+      if (markerDom instanceof HTMLElement) {
+        markerDom.style.cursor = "pointer";
+        markerDom.addEventListener("click", () => {
+          onSelectWaypointRef.current(wp.id);
+          setSelectedWp(wp);
+        });
+      }
     });
     markersRef.current = markers;
 
@@ -141,24 +252,52 @@ export function MapCanvas({
 
     if (polylinePath.length >= 2) {
       const isSatellite = mapMode === "satellite";
-      const polyline = new AMap.Polyline({
-        borderColor: isSatellite ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.7)",
-        borderWeight: isSatellite ? 2 : 3,
-        isOutline: true,
+
+      // Border layer (outline)
+      const borderPolyline = new AMap.Polyline({
+        path: polylinePath,
+        strokeColor: isSatellite ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.9)",
+        strokeWeight: 7,
+        strokeOpacity: 0.9,
         lineJoin: "round",
-        lineStyle: "solid",
+        zIndex: 0,
+      });
+
+      // Glow layer (wider, softer)
+      const glowPolyline = new AMap.Polyline({
         path: polylinePath,
         strokeColor: isSatellite ? "#FFD54F" : "#7167f6",
-        strokeOpacity: isSatellite ? 0.75 : 0.45,
-        strokeWeight: isSatellite ? 5 : 5,
+        strokeWeight: 12,
+        strokeOpacity: 0.15,
+        lineJoin: "round",
+        zIndex: 1,
       });
-      map.add(polyline);
-      polylineRef.current = polyline;
+
+      // Main layer
+      const mainPolyline = new AMap.Polyline({
+        path: polylinePath,
+        strokeColor: isSatellite ? "#FFD54F" : "#7167f6",
+        strokeWeight: 5,
+        strokeOpacity: isSatellite ? 0.8 : 0.6,
+        lineJoin: "round",
+        showDir: true,
+        zIndex: 2,
+      });
+
+      map.add([borderPolyline, glowPolyline, mainPolyline]);
+      polylinesRef.current = [borderPolyline, glowPolyline, mainPolyline];
+
       // Fit view to show all waypoints
-      // Only fit view when waypoint count changes, not on every re-render
-      if (!fitViewOnceRef.current || fitViewOnceRef.current !== resolvedWaypoints.length) {
-        fitViewOnceRef.current = resolvedWaypoints.length;
-        map.setFitView([polyline], false, [60, 60, 120, 60]);
+      const locationHash = resolvedWaypoints
+        .map(wp => wp.location ? `${wp.location[0].toFixed(4)},${wp.location[1].toFixed(4)}` : "")
+        .join("|");
+      if (locationHash !== lastFitHashRef.current && polylinePath.length >= 2) {
+        lastFitHashRef.current = locationHash;
+        map.setFitView(
+          [...markers, glowPolyline, mainPolyline, borderPolyline],
+          false,
+          [60, 60, 120, 60],
+        );
       }
     }
   }, [resolvedWaypoints, routePath, mapMode]);
@@ -198,10 +337,40 @@ export function MapCanvas({
     if (wp) setSelectedWp(wp);
   }, [selectedWaypointId, waypoints]);
 
-  // Determine hero image source
-  const heroImage = selectedWp
-    ? (selectedWp.photoUrl || selectedWp.photos?.[0]?.url)
-    : null;
+  // Determine hero image source and photo gallery
+  const allPhotos = useMemo(() => {
+    if (!selectedWp) return [];
+    if (selectedWp.photos && selectedWp.photos.length > 0) return selectedWp.photos;
+    if (selectedWp.photoUrl) return [{ url: selectedWp.photoUrl }];
+    return [];
+  }, [selectedWp]);
+
+  const heroImage = allPhotos.length > 0 ? allPhotos[heroImageIndex]?.url || allPhotos[0].url : null;
+
+  const ratingNum = selectedWp?.rating ? parseFloat(selectedWp.rating) : 0;
+  const filledStars = Math.min(5, Math.max(0, Math.round(ratingNum)));
+
+  const panelPlacement = useMemo(() => {
+    if (!clickPixel || !mapContainerSize.width) return { placement: "bottom" as const, style: {} };
+    const panelW = 320;
+    const panelH = 300;
+    const padding = 20;
+
+    // Default: show above the click point
+    let placement: "top" | "bottom" | "left" | "right" = "top";
+
+    // If too close to top, show below
+    if (clickPixel.y < panelH + padding * 2) placement = "bottom";
+
+    // Horizontal alignment
+    let left = clickPixel.x;
+    if (left < panelW / 2 + padding) left = panelW / 2 + padding;
+    if (left > mapContainerSize.width - panelW / 2 - padding) {
+      left = mapContainerSize.width - panelW / 2 - padding;
+    }
+
+    return { placement, style: { left, top: clickPixel.y } };
+  }, [clickPixel, mapContainerSize]);
 
   return (
     <section
@@ -213,119 +382,18 @@ export function MapCanvas({
         ref={mapRef}
       />
 
-      {/* Fallback map when AMap is not available */}
-      {realMapState !== "ready" && (
-        <div className="fallback-map" aria-hidden="true">
-          <svg viewBox="0 0 800 600" preserveAspectRatio="xMidYMid slice">
-            {/* Background */}
-            <rect width="800" height="600" fill="#f5f3ed" />
-
-            {/* Grid lines */}
-            <defs>
-              <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#e8e5dc" strokeWidth="0.5" />
-              </pattern>
-            </defs>
-            <rect width="800" height="600" fill="url(#grid)" />
-
-            {/* Water areas */}
-            <ellipse cx="680" cy="120" rx="140" ry="90" fill="#dceeed" opacity="0.7" />
-            <ellipse cx="120" cy="480" rx="100" ry="70" fill="#dceeed" opacity="0.5" />
-
-            {/* Park / green areas */}
-            <ellipse cx="220" cy="160" rx="80" ry="60" fill="#e8f0e4" opacity="0.6" />
-            <ellipse cx="600" cy="420" rx="110" ry="80" fill="#e8f0e4" opacity="0.5" />
-
-            {/* Roads */}
-            <g stroke="#ddd8cc" strokeWidth="2" fill="none" strokeLinecap="round">
-              <path d="M 0 300 Q 200 280 400 320 T 800 300" />
-              <path d="M 400 0 Q 420 200 380 400 T 400 600" />
-              <path d="M 0 150 L 800 180" strokeDasharray="6 6" />
-              <path d="M 200 0 L 180 600" strokeDasharray="6 6" />
-              <path d="M 600 0 L 620 600" strokeDasharray="6 6" />
-              <path d="M 0 450 Q 300 420 500 480 T 800 440" />
-            </g>
-
-            {/* Main route path */}
-            <path
-              d="M 280 380 Q 360 300 440 260 T 580 180"
-              fill="none"
-              stroke="#7167f6"
-              strokeWidth="3"
-              strokeDasharray="8 6"
-              strokeLinecap="round"
-              opacity="0.6"
-            />
-
-            {/* Decorative road labels */}
-            <text x="420" y="20" fill="#c4bfb3" fontSize="9" fontWeight="600" transform="rotate(2 420 20)">情侣中路</text>
-            <text x="20" y="295" fill="#c4bfb3" fontSize="9" fontWeight="600">海滨路</text>
-            <text x="640" y="20" fill="#c4bfb3" fontSize="9" fontWeight="600">景山路</text>
-
-            {/* City name */}
-            <text
-              x="400"
-              y="200"
-              textAnchor="middle"
-              fill="#d3cfc5"
-              fontSize="72"
-              fontWeight="800"
-              letterSpacing="8"
-              style={{ fontFamily: "var(--font-sans), sans-serif" }}
-            >
-              珠海
-            </text>
-            <text
-              x="400"
-              y="235"
-              textAnchor="middle"
-              fill="#c4bfb3"
-              fontSize="11"
-              fontWeight="600"
-              letterSpacing="3"
-            >
-              ZHUHAI
-            </text>
-
-            {/* Sample markers */}
-            <g transform="translate(280, 380)">
-              <circle r="18" fill="#7167f6" opacity="0.15" />
-              <circle r="8" fill="#7167f6" />
-              <text y="3" textAnchor="middle" fill="#fff" fontSize="9" fontWeight="700">1</text>
-            </g>
-            <g transform="translate(440, 260)">
-              <circle r="18" fill="#ff8c65" opacity="0.15" />
-              <circle r="8" fill="#ff8c65" />
-              <text y="3" textAnchor="middle" fill="#fff" fontSize="9" fontWeight="700">2</text>
-            </g>
-            <g transform="translate(580, 180)">
-              <circle r="18" fill="#24b59f" opacity="0.15" />
-              <circle r="8" fill="#24b59f" />
-              <text y="3" textAnchor="middle" fill="#fff" fontSize="9" fontWeight="700">3</text>
-            </g>
-
-            {/* Compass */}
-            <g transform="translate(720, 520)">
-              <circle r="22" fill="#fff" stroke="#e8e5dc" strokeWidth="1.5" />
-              <polygon points="0,-14 -4,4 0,2 4,4" fill="#ef4444" />
-              <polygon points="0,14 -4,-4 0,-2 4,-4" fill="#9aa2b2" />
-              <text y="-17" textAnchor="middle" fill="#9aa2b2" fontSize="7" fontWeight="700">N</text>
-            </g>
-
-            {/* Scale bar */}
-            <g transform="translate(60, 540)">
-              <rect x="0" y="0" width="60" height="4" fill="#fff" rx="2" />
-              <rect x="0" y="0" width="30" height="4" fill="#c4bfb3" rx="2" />
-              <text x="30" y="16" textAnchor="middle" fill="#9aa2b2" fontSize="8" fontWeight="600">1 km</text>
-            </g>
-          </svg>
-        </div>
-      )}
 
       {/* Loading overlay */}
       {realMapState === "loading" && (
         <div className="map-loading-overlay">
-          <Loader2 size={28} className="map-spinner" />
+          <div className="map-loading-brand">
+            {"Along 同路".split("").map((char, i) => (
+              <span key={i} style={{ animationDelay: `${i * 0.1}s` }}>
+                {char === " " ? " " : char}
+              </span>
+            ))}
+            <span className="map-loading-cursor" />
+          </div>
           <p>正在加载地图…</p>
         </div>
       )}
@@ -370,7 +438,7 @@ export function MapCanvas({
 
       {/* ===== Custom Detail Panel V2 ===== */}
       {selectedWp && (
-        <div className="map-detail-panel-v2">
+        <div className="map-detail-panel-v2 is-visible">
           {/* Close button */}
           <button
             className="map-detail-panel-v2-close"
@@ -402,7 +470,7 @@ export function MapCanvas({
 
           {/* Ready state */}
           {selectedWp.resolveStatus === "ready" && (
-            <>
+            <div className="map-detail-panel-v2-body">
               {/* Hero image */}
               {heroImage ? (
                 <div className="map-detail-panel-v2-hero">
@@ -414,53 +482,142 @@ export function MapCanvas({
                 </div>
               )}
 
-              {/* Title + rating */}
-              <div className="map-detail-panel-v2-title-row">
-                <h3>{selectedWp.name}</h3>
-                {selectedWp.rating && (
-                  <span className="map-detail-panel-v2-rating">
-                    <Star size={14} fill="#ff8c00" color="#ff8c00" />
-                    {selectedWp.rating}
-                  </span>
-                )}
-              </div>
-
-              {/* Tags */}
-              {selectedWp.category && (
-                <div className="map-detail-panel-v2-tags">
-                  <span className="v2-tag">{selectedWp.category}</span>
+              {/* Photo gallery thumbnails */}
+              {allPhotos.length > 1 && (
+                <div className="map-detail-gallery">
+                  {allPhotos.map((photo, idx) => (
+                    <button
+                      key={idx}
+                      className={`map-detail-gallery-thumb ${idx === heroImageIndex ? "is-active" : ""}`}
+                      onClick={() => setHeroImageIndex(idx)}
+                      type="button"
+                      aria-label={`查看图片 ${idx + 1}`}
+                    >
+                      <img src={photo.url} alt={photo.title || `${selectedWp.name} ${idx + 1}`} />
+                    </button>
+                  ))}
                 </div>
               )}
 
-              {/* Info rows */}
-              <div className="map-detail-panel-v2-info">
-                {selectedWp.address && (
-                  <div className="v2-info-row">
-                    <MapPin size={14} color="#888" />
-                    <span>{selectedWp.address}</span>
-                  </div>
-                )}
-                {selectedWp.businessHours && (
-                  <div className="v2-info-row">
-                    <Clock size={14} color="#888" />
-                    <span>{selectedWp.businessHours}</span>
-                  </div>
-                )}
-                {selectedWp.cost && (
-                  <div className="v2-info-row">
-                    <Banknote size={14} color="#888" />
-                    <span>{selectedWp.cost}</span>
-                  </div>
-                )}
+              {/* Title + rating bar */}
+              <div className="map-detail-panel-v2-title-row">
+                <h3>{selectedWp.name}</h3>
               </div>
+
+              {selectedWp.rating && (
+                <div className="map-detail-rating-bar">
+                  <div className="stars">
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <Star
+                        key={i}
+                        size={14}
+                        className={i < filledStars ? "star is-filled" : "star"}
+                        fill={i < filledStars ? "#f5b041" : "none"}
+                        color={i < filledStars ? "#f5b041" : "var(--ink-200)"}
+                      />
+                    ))}
+                  </div>
+                  <span className="score">{selectedWp.rating}</span>
+                  <span className="reviews">{ratingLabel(ratingNum)}</span>
+                </div>
+              )}
+
+              {/* Category + area badge row */}
+              {(selectedWp.category || selectedWp.address) && (
+                <div className="map-detail-panel-v2-tags">
+                  {selectedWp.category && (
+                    <span className="map-detail-panel-v2-tag tag-coral">{selectedWp.category}</span>
+                  )}
+                  {selectedWp.address && (
+                    <span className="map-detail-panel-v2-tag tag-mint">
+                      {selectedWp.address.split(/[区市县]/)[0]}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Review section */}
+              {(() => {
+                const reviewData = findPoiReview(selectedWp.name);
+                return reviewData ? (
+                  <div className="map-detail-section">
+                    <div className="map-detail-review-summary">
+                      <p>{reviewData.summary}</p>
+                    </div>
+                    <div className="map-detail-review-tags">
+                      {reviewData.tags.map((tag) => (
+                        <span key={tag} className="map-detail-review-tag">{tag}</span>
+                      ))}
+                    </div>
+                    {reviewData.tips && (
+                      <div className="map-detail-review-tip">
+                        <span>💡 {reviewData.tips}</span>
+                      </div>
+                    )}
+                  </div>
+                ) : null;
+              })()}
+
+              {/* Action button */}
+              {onAddWaypoint && selectedWp.location && (
+                <button
+                  type="button"
+                  className="map-detail-action-btn"
+                  onClick={() => {
+                    if (!selectedWp.location) return;
+                    onAddWaypoint({
+                      id: selectedWp.id,
+                      name: selectedWp.name,
+                      location: selectedWp.location,
+                      address: selectedWp.address,
+                    });
+                  }}
+                >
+                  <Plus size={16} />
+                  加入行程
+                </button>
+              )}
+
+              {/* Info sections */}
+              <div className="map-detail-section">
+                <div className="map-detail-panel-v2-info">
+                  {selectedWp.address && (
+                    <div className="v2-info-row">
+                      <MapPin size={14} color="#888" />
+                      <span>{selectedWp.address}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {(selectedWp.businessHours || selectedWp.cost) && (
+                <div className="map-detail-section">
+                  <div className="map-detail-panel-v2-info">
+                    {selectedWp.businessHours && (
+                      <div className="v2-info-row">
+                        <Clock size={14} color="#888" />
+                        <span>{selectedWp.businessHours}</span>
+                      </div>
+                    )}
+                    {selectedWp.cost && (
+                      <div className="v2-info-row">
+                        <Banknote size={14} color="#888" />
+                        <span>{selectedWp.cost}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Description */}
               {selectedWp.description && (
-                <div className="map-detail-panel-v2-desc">
-                  <p>{selectedWp.description}</p>
+                <div className="map-detail-section">
+                  <div className="map-detail-panel-v2-desc">
+                    <p>{selectedWp.description}</p>
+                  </div>
                 </div>
               )}
-            </>
+            </div>
           )}
         </div>
       )}
@@ -472,6 +629,120 @@ export function MapCanvas({
         </div>
       )}
 
+      {/* ===== Clicked POI Panel ===== */}
+      {clickPosition && clickPixel && (
+        <div
+          className={`map-poi-panel is-placement-${panelPlacement.placement}`}
+          style={panelPlacement.style}
+        >
+          <div className="map-poi-panel-header">
+            <strong>附近地点</strong>
+            <button
+              onClick={() => {
+                setClickedPois([]);
+                setClickPixel(null);
+              }}
+              type="button"
+            >
+              ×
+            </button>
+          </div>
+          <div className="map-poi-list">
+            {clickedPois.length === 0 ? (
+              <div className="map-poi-empty">
+                附近暂无景点或餐厅推荐，试试点击其他地方
+              </div>
+            ) : (
+              clickedPois.map((poi: any, idx: number) => {
+                const poiLoc = parsePoiLocation(poi);
+                const distance = poiLoc ? haversineDistance(clickPosition, poiLoc) : null;
+                const poiRating = poi.rating ? parseFloat(poi.rating) : 0;
+                const poiCategory = poi.type ? String(poi.type).split(";")[0] : "";
+                const reviewData = findPoiReview(poi.name);
+                return (
+                  <div key={idx} className="map-poi-item">
+                    <div className="map-poi-info">
+                      <div className="map-poi-name">{poi.name}</div>
+                      <div className="map-poi-meta">
+                        {distance !== null && (
+                          <span className="map-poi-distance">{formatDistance(distance)}</span>
+                        )}
+                        {!reviewData && poiRating > 0 && (
+                          <span className="map-poi-rating-mini">
+                            <Star size={10} fill="#ff8c00" color="#ff8c00" />
+                            {poi.rating}
+                          </span>
+                        )}
+                        {poiCategory && (
+                          <span className="map-poi-category-tag">{poiCategory}</span>
+                        )}
+                      </div>
+                      {reviewData && (
+                        <div className="map-poi-review-summary">
+                          {truncate(reviewData.summary, 40)}
+                        </div>
+                      )}
+                      {reviewData && (
+                        <div className="map-poi-review-footer">
+                          <div className="map-poi-review-tags">
+                            {reviewData.tags.slice(0, 2).map((tag) => (
+                              <span key={tag} className="map-poi-review-tag">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                          <span className="map-poi-review-count">
+                            {formatReviewCount(reviewData.reviewCount)}
+                          </span>
+                        </div>
+                      )}
+                      <div className="map-poi-address">{poi.address || ""}</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="map-poi-add-btn"
+                      onClick={() => {
+                        if (onAddWaypoint) {
+                          let lng = clickPosition[0];
+                          let lat = clickPosition[1];
+                          const loc = poi.location;
+                          if (typeof loc === "string") {
+                            const parts = loc.split(",");
+                            const parsedLng = Number(parts[0]);
+                            const parsedLat = Number(parts[1]);
+                            if (Number.isFinite(parsedLng)) lng = parsedLng;
+                            if (Number.isFinite(parsedLat)) lat = parsedLat;
+                          } else if (Array.isArray(loc) && loc.length >= 2) {
+                            const parsedLng = Number(loc[0]);
+                            const parsedLat = Number(loc[1]);
+                            if (Number.isFinite(parsedLng)) lng = parsedLng;
+                            if (Number.isFinite(parsedLat)) lat = parsedLat;
+                          } else if (loc && typeof loc === "object") {
+                            const parsedLng = Number(loc.lng ?? loc.getLng?.() ?? loc.longitude);
+                            const parsedLat = Number(loc.lat ?? loc.getLat?.() ?? loc.latitude);
+                            if (Number.isFinite(parsedLng)) lng = parsedLng;
+                            if (Number.isFinite(parsedLat)) lat = parsedLat;
+                          }
+                          onAddWaypoint({
+                            id: `poi-${Date.now()}-${idx}`,
+                            name: poi.name,
+                            location: [lng, lat],
+                            address: poi.address || "",
+                          });
+                          setClickedPois([]);
+                          setClickPixel(null);
+                        }
+                      }}
+                    >
+                      加入行程
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
 
     </section>
   );

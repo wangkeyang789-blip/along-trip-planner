@@ -1,10 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Mic,
   Square,
-  Play,
   Route,
   Compass,
   Sparkles,
@@ -12,19 +11,16 @@ import {
   CloudSun,
   Clock3,
   Flag,
-  MessageCircleQuestion,
-  Trash2,
   ChevronDown,
   Type,
   AlertTriangle,
+  Keyboard,
+  X,
 } from "lucide-react";
-import { useWebSpeech } from "@/hooks/use-web-speech";
 import { useXfyunRealtimeASR } from "@/hooks/use-xfyun-asr";
 import { useWaypointResolver } from "@/hooks/use-amap-data";
 import { useRouteVariantRouting } from "@/hooks/use-route-variant-routing";
 import { MapCanvas } from "@/components/map-canvas";
-import { ChatMessageWithPlaces } from "@/components/chat-place-highlight";
-import type { Waypoint } from "@/lib/types";
 import type { RouteVariantSnapshot } from "@/lib/room-contracts";
 
 /* ------------------------------------------------------------------ */
@@ -65,11 +61,9 @@ const CITIES = ["珠海", "北京", "上海", "杭州", "厦门"];
 /* ------------------------------------------------------------------ */
 
 export function TripRecorder() {
-  const speech = useWebSpeech();
   const asr = useXfyunRealtimeASR();
 
   const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
-  const [currentTranscript, setCurrentTranscript] = useState("");
   const [agentThinking, setAgentThinking] = useState(false);
   const [city, setCity] = useState("珠海");
   const [plan, setPlan] = useState<AgentPlan | null>(null);
@@ -77,6 +71,9 @@ export function TripRecorder() {
   const [notice, setNotice] = useState<string | null>(null);
   const [mediaText, setMediaText] = useState("");
   const [showTextInput, setShowTextInput] = useState(false);
+
+  const autoPlanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTranscriptLenRef = useRef(0);
 
   /* -------------------- Notice helper -------------------- */
 
@@ -86,14 +83,6 @@ export function TripRecorder() {
       setNotice((current) => (current === message ? null : current));
     }, 2200);
   }, []);
-
-  /* -------------------- Real-time transcript -------------------- */
-
-  useEffect(() => {
-    if (speech.isListening) {
-      setCurrentTranscript(speech.transcript);
-    }
-  }, [speech.transcript, speech.isListening]);
 
   /* -------------------- Xfyun ASR completed handler -------------------- */
 
@@ -109,56 +98,32 @@ export function TripRecorder() {
         },
       ]);
       showNotice("语音转写完成");
+
+      // Clear auto-plan debounce timer
+      if (autoPlanTimerRef.current) {
+        clearTimeout(autoPlanTimerRef.current);
+        autoPlanTimerRef.current = null;
+      }
+
       // Defer requestPlan to avoid circular dependency / TDZ issues
       setTimeout(() => {
-        const logText = transcriptLog.map((t) => t.text).join("\n");
-        const allText = logText + "\n" + text;
-        if (allText.trim().length >= 10) {
-          void requestPlan();
-        }
+        void requestPlan(text);
       }, 0);
       asr.clear();
+      lastTranscriptLenRef.current = 0;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asr.status, asr.transcript]);
 
-  /* -------------------- Recording control -------------------- */
-
-  const toggleRecording = useCallback(() => {
-    if (asr.status === "recording" || asr.status === "connecting") {
-      asr.stop();
-    } else if (asr.status === "finalizing") {
-      // Wait for final results; do nothing
-    } else if (asr.status === "completed" || asr.status === "error") {
-      asr.clear();
-    } else {
-      asr.start();
-    }
-  }, [asr]);
-
-  const submitMediaText = useCallback(() => {
-    const text = mediaText.trim();
-    if (!text) return;
-    setTranscriptLog((prev) => [
-      ...prev,
-      {
-        id: generateId(),
-        time: formatTime(new Date()),
-        text,
-      },
-    ]);
-    setMediaText("");
-    setShowTextInput(false);
-    void requestPlan();
-  }, [mediaText]);
-
   /* -------------------- AI Planning -------------------- */
 
-  const requestPlan = useCallback(async () => {
+  const requestPlan = useCallback(async (extraText?: string) => {
     const logText = transcriptLog.map((t) => t.text).join("\n");
-    const allText = logText + (currentTranscript ? "\n" + currentTranscript : "");
-    if (allText.trim().length < 10) return;
+    const allText = logText + (extraText ? "\n" + extraText : "");
+    if (allText.trim().length < 3) return;
 
+    console.log("[TripRecorder] requesting plan with text:", allText.trim().slice(0, 200));
+    showNotice("AI 正在规划行程…");
     setAgentThinking(true);
     try {
       const response = await fetch("/api/ai/plan", {
@@ -181,7 +146,9 @@ export function TripRecorder() {
       const data = (await response.json().catch(() => ({}))) as {
         configured?: boolean;
         plan?: AgentPlan;
+        error?: string;
       };
+      console.log("[TripRecorder] plan response:", response.status, data);
       if (response.ok && data.plan) {
         setPlan(data.plan);
         if (data.plan.city && typeof data.plan.city === "string") {
@@ -189,6 +156,12 @@ export function TripRecorder() {
         }
       } else if (data.configured === false) {
         showNotice("AI API 未配置");
+      } else if (data.error) {
+        showNotice(`规划失败: ${data.error}`);
+        console.warn("[TripRecorder] plan API error:", data.error);
+      } else {
+        showNotice("规划未返回有效结果，请尝试输入更多旅行意向");
+        console.warn("[TripRecorder] plan API returned no plan:", data);
       }
     } catch (err) {
       console.warn("[TripRecorder] plan failed:", err);
@@ -196,21 +169,130 @@ export function TripRecorder() {
     } finally {
       setAgentThinking(false);
     }
-  }, [transcriptLog, currentTranscript, city, showNotice]);
+  }, [transcriptLog, city, showNotice]);
+
+  /* -------------------- Auto-trigger planning while recording -------------------- */
+
+  useEffect(() => {
+    if (asr.status !== "recording" || !asr.transcript.trim() || agentThinking) return;
+
+    const currentLen = asr.transcript.length;
+    if (currentLen <= lastTranscriptLenRef.current) return;
+
+    if (autoPlanTimerRef.current) {
+      clearTimeout(autoPlanTimerRef.current);
+    }
+
+    autoPlanTimerRef.current = setTimeout(() => {
+      if (agentThinking) return;
+      lastTranscriptLenRef.current = asr.transcript.length;
+      void requestPlan(asr.transcript);
+    }, 3000);
+  }, [asr.transcript, asr.status, agentThinking, requestPlan]);
+
+  useEffect(() => {
+    return () => {
+      if (autoPlanTimerRef.current) {
+        clearTimeout(autoPlanTimerRef.current);
+      }
+    };
+  }, []);
+
+  const submitMediaText = useCallback(() => {
+    const text = mediaText.trim();
+    if (!text) return;
+    setTranscriptLog((prev) => [
+      ...prev,
+      {
+        id: generateId(),
+        time: formatTime(new Date()),
+        text,
+      },
+    ]);
+    setMediaText("");
+    setShowTextInput(false);
+    void requestPlan(text);
+  }, [mediaText, requestPlan]);
+
+  /* -------------------- Recording control -------------------- */
+
+  const toggleRecording = useCallback(() => {
+    if (asr.status === "recording" || asr.status === "connecting") {
+      asr.stop();
+    } else if (asr.status === "finalizing") {
+      // Wait for final results; do nothing
+    } else if (asr.status === "completed" || asr.status === "error") {
+      asr.clear();
+    } else {
+      asr.start();
+    }
+  }, [asr]);
 
   /* -------------------- Clear log -------------------- */
 
   const clearLog = useCallback(() => {
     setTranscriptLog([]);
-    setCurrentTranscript("");
     setPlan(null);
     setSelectedWpId(null);
     setMediaText("");
     setShowTextInput(false);
-    speech.clear();
     asr.clear();
+    lastTranscriptLenRef.current = 0;
     showNotice("已清空记录");
-  }, [speech, asr, showNotice]);
+  }, [asr, showNotice]);
+
+  /* -------------------- Add waypoint from map -------------------- */
+
+  const handleAddWaypoint = useCallback((newWp: { id: string; name: string; location: [number, number]; address?: string }) => {
+    setPlan((prev) => {
+      if (!prev || !prev.routeVariants?.[0]) {
+        return {
+          routeVariants: [{
+            id: "manual",
+            name: "自定义路线",
+            label: "",
+            theme: "",
+            description: "",
+            transportSummary: null,
+            waypoints: [{
+              id: newWp.id,
+              name: newWp.name,
+              order: 0,
+              description: newWp.address,
+              resolveStatus: "ready" as const,
+              recommendedTransport: "walking" as const,
+              address: newWp.address,
+              location: newWp.location,
+            }],
+            segments: [],
+            totalDistanceText: null,
+            totalDurationText: null,
+            totalCostText: null,
+            routeStatus: "pending" as const,
+          }],
+        } as AgentPlan;
+      }
+      const variant = prev.routeVariants[0];
+      const maxOrder = Math.max(...variant.waypoints.map((w) => w.order), -1);
+      return {
+        ...prev,
+        routeVariants: [{
+          ...variant,
+          waypoints: [...variant.waypoints, {
+            id: newWp.id,
+            name: newWp.name,
+            order: maxOrder + 1,
+            description: newWp.address,
+            resolveStatus: "ready" as const,
+            recommendedTransport: "walking" as const,
+            address: newWp.address,
+            location: newWp.location,
+          }],
+        }],
+      };
+    });
+    showNotice(`已添加 ${newWp.name}`);
+  }, [showNotice]);
 
   /* -------------------- Waypoint resolution -------------------- */
 
@@ -287,174 +369,6 @@ export function TripRecorder() {
 
       {/* ===== Body ===== */}
       <div className="workspace-body">
-        {/* ---- Left panel ---- */}
-        <aside className="summary-sidebar recorder-sidebar">
-          {/* Recording control */}
-          <div className="recorder-control">
-            <button
-              className={`recorder-btn ${asr.status === "recording" || asr.status === "connecting" ? "is-recording" : ""}`}
-              onClick={toggleRecording}
-              type="button"
-              aria-label={
-                asr.status === "recording" || asr.status === "connecting"
-                  ? "停止录音"
-                  : asr.status === "completed" || asr.status === "error"
-                    ? "重新录音"
-                    : "开始录音"
-              }
-            >
-              {asr.status === "recording" || asr.status === "connecting" ? (
-                <Square size={28} />
-              ) : (
-                <Mic size={32} />
-              )}
-            </button>
-            <p className="recorder-label">
-              {asr.status === "connecting"
-                ? "连接中…"
-                : asr.status === "recording"
-                  ? "正在实时转写…"
-                  : asr.status === "finalizing"
-                    ? "转写收尾中…"
-                    : asr.status === "error"
-                      ? "转写出错"
-                      : "点击录制音频备忘"}
-            </p>
-            {asr.error && (
-              <p className="recorder-hint error">
-                {asr.error}
-                <button
-                  className="recorder-fallback-link"
-                  onClick={() => setShowTextInput(true)}
-                  type="button"
-                >
-                  改用文字输入
-                </button>
-              </p>
-            )}
-            {asr.status === "idle" && (
-              <p className="recorder-hint">
-                点击按钮开始实时语音转写。
-                {!showTextInput && (
-                  <button
-                    className="recorder-fallback-link"
-                    onClick={() => setShowTextInput(true)}
-                    type="button"
-                  >
-                    改用文字输入
-                  </button>
-                )}
-              </p>
-            )}
-            {(asr.status === "recording" || asr.status === "connecting") && asr.interimText && (
-              <p className="recorder-hint">
-                <span className="recorder-interim">{asr.interimText}</span>
-              </p>
-            )}
-
-            {/* Text input fallback */}
-            {showTextInput && (
-              <div className="recorder-text-fallback">
-                <div className="recorder-media-input">
-                  <Type size={14} />
-                  <input
-                    type="text"
-                    placeholder="输入讨论内容，按回车发送…"
-                    value={mediaText}
-                    onChange={(e) => setMediaText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") submitMediaText();
-                    }}
-                  />
-                  <button onClick={submitMediaText} type="button">
-                    <Sparkles size={14} />
-                  </button>
-                </div>
-                <button
-                  className="recorder-fallback-close"
-                  onClick={() => {
-                    setShowTextInput(false);
-                    setMediaText("");
-                  }}
-                  type="button"
-                >
-                  取消
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Transcript log */}
-          <div className="recorder-log">
-            <div className="section-title">
-              <div>
-                <MessageCircleQuestion size={16} />
-                <strong>讨论记录</strong>
-              </div>
-              {transcriptLog.length > 0 && (
-                <button
-                  className="recorder-clear-btn"
-                  onClick={clearLog}
-                  type="button"
-                >
-                  <Trash2 size={12} />
-                  清空记录
-                </button>
-              )}
-            </div>
-
-            <div className="recorder-messages">
-              {transcriptLog.length === 0 && asr.status !== "recording" && asr.status !== "connecting" ? (
-                <div className="recorder-empty">
-                  <span>点击上方按钮开始录音，录下你和朋友的行程讨论</span>
-                </div>
-              ) : (
-                <>
-                  {transcriptLog.map((entry) => (
-                    <div key={entry.id} className="recorder-entry">
-                      <span className="recorder-entry-time">[{entry.time}]</span>
-                      <ChatMessageWithPlaces
-                        userName="讨论"
-                        userColor="#75a7e8"
-                        userInitial="讨"
-                        text={entry.text}
-                        waypoints={resolvedWaypoints}
-                        onPlaceClick={(wp) => {
-                          setSelectedWpId(wp.id);
-                          showNotice(`已查看 ${wp.name}`);
-                        }}
-                      />
-                    </div>
-                  ))}
-                  {(asr.status === "recording" || asr.status === "connecting") && (
-                    <div className="recorder-entry is-live">
-                      <span className="recorder-entry-time">[{formatTime(new Date())}]</span>
-                      <div className="chat-message">
-                        <div
-                          className="chat-avatar"
-                          style={{ "--avatar-color": "#75a7e8" } as React.CSSProperties}
-                        >
-                          讨
-                        </div>
-                        <div className="chat-bubble">
-                          <small>讨论</small>
-                          <p>
-                            {asr.interimText ? (
-                              <span className="recorder-interim">{asr.interimText}</span>
-                            ) : (
-                              <span className="recorder-waiting">正在转写…</span>
-                            )}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </aside>
-
         {/* ---- Map ---- */}
         <div className="map-workspace">
           <div className="map-toolbar">
@@ -478,7 +392,120 @@ export function TripRecorder() {
             selectedWaypointId={selectedWpId}
             onSelectWaypoint={(wpId) => setSelectedWpId(wpId)}
             onNotify={showNotice}
+            onAddWaypoint={handleAddWaypoint}
           />
+
+          {/* ===== Floating Recorder ===== */}
+          <div className="floating-recorder">
+            {/* Transcript card */}
+            {(asr.status === "recording" || asr.status === "connecting" || asr.transcript || asr.interimText || asr.status === "error") && (
+              <div className="floating-transcript-card">
+                <div className="floating-transcript-header">
+                  <span className={`floating-recorder-dot ${asr.status === "recording" || asr.status === "connecting" ? "is-recording" : ""}`} />
+                  <span className="floating-transcript-status">
+                    {asr.status === "connecting"
+                      ? "连接中…"
+                      : asr.status === "recording"
+                        ? "正在实时转写…"
+                        : asr.status === "error"
+                          ? "转写出错"
+                          : "转写完成"}
+                  </span>
+                </div>
+                <div className="floating-transcript-body">
+                  {asr.transcript && <p>{asr.transcript}</p>}
+                  {asr.interimText && <p className="floating-transcript-interim">{asr.interimText}</p>}
+                  {!asr.transcript && !asr.interimText && asr.status !== "error" && (
+                    <p className="floating-transcript-placeholder">正在听…</p>
+                  )}
+                  {asr.error && <p className="floating-transcript-error">{asr.error}</p>}
+                </div>
+              </div>
+            )}
+
+            {/* Text input fallback */}
+            {showTextInput && (
+              <div className="floating-text-input-card">
+                <div className="floating-text-input-header">
+                  <span>文字输入</span>
+                  <button
+                    className="floating-text-input-close"
+                    onClick={() => {
+                      setShowTextInput(false);
+                      setMediaText("");
+                    }}
+                    type="button"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                <div className="recorder-media-input">
+                  <Type size={14} />
+                  <input
+                    type="text"
+                    placeholder="输入讨论内容，按回车发送…"
+                    value={mediaText}
+                    onChange={(e) => setMediaText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") submitMediaText();
+                    }}
+                    autoFocus
+                  />
+                  <button onClick={submitMediaText} type="button">
+                    <Sparkles size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="floating-recorder-controls">
+              {/* Mic button */}
+              <button
+                className={`floating-recorder-btn ${asr.status === "recording" || asr.status === "connecting" ? "is-recording" : ""}`}
+                onClick={toggleRecording}
+                type="button"
+                aria-label={
+                  asr.status === "recording" || asr.status === "connecting"
+                    ? "停止录音"
+                    : asr.status === "completed" || asr.status === "error"
+                      ? "重新录音"
+                      : "开始录音"
+                }
+              >
+                {asr.status === "recording" || asr.status === "connecting" ? (
+                  <Square size={22} />
+                ) : (
+                  <Mic size={26} />
+                )}
+              </button>
+
+              {/* Text input toggle */}
+              {!showTextInput && (
+                <button
+                  className="floating-text-toggle"
+                  onClick={() => setShowTextInput(true)}
+                  type="button"
+                  aria-label="文字输入"
+                  title="文字输入"
+                >
+                  <Keyboard size={18} />
+                </button>
+              )}
+
+              {/* Clear button */}
+              {(plan || transcriptLog.length > 0) && (
+                <button
+                  className="floating-clear-btn"
+                  onClick={clearLog}
+                  type="button"
+                  aria-label="清空"
+                  title="清空记录"
+                >
+                  <Compass size={16} />
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* ---- Right panel ---- */}
@@ -486,17 +513,6 @@ export function TripRecorder() {
           <div className="map-route-panel-header">
             <Route size={16} />
             <strong>行程单</strong>
-            {hasRoute && (
-              <button
-                className="map-route-trigger-btn"
-                onClick={() => void requestPlan()}
-                type="button"
-                disabled={agentThinking}
-              >
-                <Sparkles size={12} />
-                {agentThinking ? "生成中…" : "重新生成"}
-              </button>
-            )}
           </div>
 
           {hasRoute ? (
@@ -585,6 +601,10 @@ export function TripRecorder() {
 
       {/* ===== Styles ===== */}
       <style jsx>{`
+        /* Override workspace layout: 2 columns instead of 3 */
+        .workspace-page > :global(.workspace-body) {
+          grid-template-columns: minmax(420px, 1fr) 320px;
+        }
         .city-selector {
           display: inline-flex;
           align-items: center;
@@ -607,22 +627,129 @@ export function TripRecorder() {
           cursor: pointer;
           outline: none;
         }
-        .recorder-sidebar {
-          width: 320px;
-        }
-        .recorder-control {
+
+        /* Floating recorder */
+        .floating-recorder {
+          position: absolute;
+          bottom: 28px;
+          left: 28px;
+          z-index: 200;
           display: flex;
           flex-direction: column;
+          align-items: flex-start;
+          gap: 12px;
+          max-width: 360px;
+        }
+        .floating-transcript-card {
+          background: rgba(255, 255, 255, 0.96);
+          border-radius: 16px;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1), 0 2px 8px rgba(0, 0, 0, 0.06);
+          padding: 14px 18px;
+          backdrop-filter: blur(12px);
+          border: 1px solid rgba(0, 0, 0, 0.04);
+          min-width: 200px;
+          max-width: 320px;
+          animation: float-card-in 0.3s ease;
+        }
+        @keyframes float-card-in {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .floating-transcript-header {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 8px;
+        }
+        .floating-recorder-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: var(--ink-300);
+          flex-shrink: 0;
+        }
+        .floating-recorder-dot.is-recording {
+          background: #ef4444;
+          animation: dot-pulse 1.2s ease-in-out infinite;
+        }
+        @keyframes dot-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.35; }
+        }
+        .floating-transcript-status {
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--ink-500);
+        }
+        .floating-transcript-body {
+          font-size: 13px;
+          line-height: 1.5;
+          color: var(--ink-800);
+          max-height: 120px;
+          overflow-y: auto;
+        }
+        .floating-transcript-body p {
+          margin: 0;
+        }
+        .floating-transcript-interim {
+          color: var(--ink-400);
+          font-style: italic;
+        }
+        .floating-transcript-placeholder {
+          color: var(--ink-400);
+        }
+        .floating-transcript-error {
+          color: #ef4444;
+          font-size: 12px;
+        }
+
+        /* Text input card */
+        .floating-text-input-card {
+          background: rgba(255, 255, 255, 0.98);
+          border-radius: 16px;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+          padding: 12px 14px;
+          backdrop-filter: blur(12px);
+          border: 1px solid rgba(0, 0, 0, 0.06);
+          min-width: 260px;
+          animation: float-card-in 0.25s ease;
+        }
+        .floating-text-input-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 8px;
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--ink-600);
+        }
+        .floating-text-input-close {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 24px;
+          height: 24px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: var(--ink-400);
+          cursor: pointer;
+        }
+        .floating-text-input-close:hover {
+          background: var(--ink-100);
+          color: var(--ink-600);
+        }
+
+        /* Recorder controls row */
+        .floating-recorder-controls {
+          display: flex;
           align-items: center;
           gap: 12px;
-          padding: 28px 16px 20px;
-          border-bottom: 1px solid rgba(228, 230, 237, 0.72);
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(250, 249, 255, 0.6));
         }
-        .recorder-btn {
+        .floating-recorder-btn {
           position: relative;
-          width: 80px;
-          height: 80px;
+          width: 56px;
+          height: 56px;
           border-radius: 50%;
           display: flex;
           align-items: center;
@@ -632,138 +759,74 @@ export function TripRecorder() {
           border: 2px solid #ef4444;
           background: var(--white);
           color: #ef4444;
+          box-shadow: 0 4px 16px rgba(239, 68, 68, 0.15);
         }
-        .recorder-btn:hover {
-          transform: scale(1.05);
-          box-shadow: 0 8px 24px rgba(239, 68, 68, 0.18);
+        .floating-recorder-btn:hover {
+          transform: scale(1.08);
+          box-shadow: 0 6px 24px rgba(239, 68, 68, 0.22);
         }
-        .recorder-btn.is-recording {
+        .floating-recorder-btn.is-recording {
           background: #ef4444;
           color: white;
           border-color: #ef4444;
         }
-        .recorder-btn.is-recording::after {
+        .floating-recorder-btn.is-recording::after {
           content: "";
           position: absolute;
-          width: 80px;
-          height: 80px;
+          width: 56px;
+          height: 56px;
           border-radius: 50%;
           border: 2px solid #ef4444;
           animation: recorder-pulse 1.5s ease-out infinite;
         }
         @keyframes recorder-pulse {
-          0% {
-            transform: scale(1);
-            opacity: 0.6;
-          }
-          100% {
-            transform: scale(1.6);
-            opacity: 0;
-          }
+          0% { transform: scale(1); opacity: 0.6; }
+          100% { transform: scale(1.6); opacity: 0; }
         }
-        .recorder-label {
-          margin: 0;
-          color: var(--ink-600);
-          font-size: 13px;
-          font-weight: 600;
-        }
-        .recorder-hint {
-          margin: 0;
-          color: var(--ink-500);
-          font-size: 11px;
-          text-align: center;
-          max-width: 260px;
-        }
-        .recorder-hint.error {
-          color: #ef4444;
-        }
-        .recorder-log {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          overflow: hidden;
-          padding: 12px 14px;
-        }
-        .recorder-clear-btn {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          border: 0;
-          background: transparent;
-          color: var(--ink-500);
-          font-size: 11px;
-          cursor: pointer;
-          transition: color 150ms ease;
-        }
-        .recorder-clear-btn:hover {
-          color: #ef4444;
-        }
-        .recorder-messages {
-          flex: 1;
-          overflow-y: auto;
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-        .recorder-empty {
+        .floating-text-toggle {
+          width: 40px;
+          height: 40px;
+          border-radius: 50%;
           display: flex;
           align-items: center;
           justify-content: center;
-          height: 100%;
-          color: var(--ink-500);
-          font-size: 12px;
-          text-align: center;
-          padding: 24px 12px;
-        }
-        .recorder-entry {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-        .recorder-entry-time {
-          color: var(--ink-500);
-          font-size: 10px;
-          font-weight: 600;
-          padding-left: 46px;
-        }
-        .recorder-interim {
-          color: var(--ink-500);
-          font-style: italic;
-        }
-        .recorder-waiting {
-          color: var(--ink-400);
-        }
-        .recorder-route-sidebar {
-          width: 280px;
-        }
-        .recorder-fallback-link {
-          display: inline;
-          margin-left: 6px;
-          border: 0;
-          background: transparent;
-          color: #7167f6;
-          font-size: 11px;
-          font-weight: 600;
           cursor: pointer;
-          text-decoration: underline;
-          text-underline-offset: 2px;
+          transition: all 150ms ease;
+          border: 1px solid var(--ink-200);
+          background: rgba(255, 255, 255, 0.95);
+          color: var(--ink-600);
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
         }
-        .recorder-fallback-link:hover {
-          color: #5a4fd9;
+        .floating-text-toggle:hover {
+          background: var(--white);
+          transform: scale(1.05);
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }
-        .recorder-media-playback {
-          width: 100%;
-          margin-top: 8px;
+        .floating-clear-btn {
+          width: 40px;
+          height: 40px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: all 150ms ease;
+          border: 1px solid var(--ink-200);
+          background: rgba(255, 255, 255, 0.95);
+          color: var(--ink-500);
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
         }
-        .recorder-media-playback audio {
-          border-radius: 8px;
-          height: 32px;
+        .floating-clear-btn:hover {
+          background: var(--white);
+          color: #ef4444;
+          transform: scale(1.05);
         }
+
+        /* Shared input styles */
         .recorder-media-input {
           display: flex;
           align-items: center;
           gap: 8px;
-          margin-top: 8px;
           padding: 6px 10px;
           border: 1px solid var(--ink-200);
           border-radius: 10px;
@@ -791,35 +854,7 @@ export function TripRecorder() {
           color: var(--violet-700);
           cursor: pointer;
         }
-        .recorder-text-fallback {
-          width: 100%;
-          margin-top: 8px;
-        }
-        .recorder-fallback-close {
-          margin-top: 6px;
-          border: 0;
-          background: transparent;
-          color: var(--ink-500);
-          font-size: 11px;
-          cursor: pointer;
-        }
-        .recorder-fallback-close:hover {
-          color: var(--ink-700);
-        }
-        .recorder-spinner {
-          display: inline-block;
-          width: 12px;
-          height: 12px;
-          margin-right: 6px;
-          border: 2px solid var(--ink-200);
-          border-top-color: var(--violet-500);
-          border-radius: 50%;
-          animation: recorder-spin 0.8s linear infinite;
-          vertical-align: middle;
-        }
-        @keyframes recorder-spin {
-          to { transform: rotate(360deg); }
-        }
+
         .map-route-partial-hint {
           display: flex;
           align-items: center;

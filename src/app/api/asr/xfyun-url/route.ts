@@ -16,8 +16,8 @@ function buildSigna(appid: string, ts: string, apiKey: string): string {
 }
 
 export async function GET() {
-  const appid = process.env.APPID?.trim();
-  const apiKey = process.env.APIKey?.trim();
+  const appid = process.env.APPID?.trim().replace(/[\x00-\x1F\x7F]/g, "");
+  const apiKey = process.env.APIKey?.trim().replace(/[\x00-\x1F\x7F]/g, "");
 
   if (!appid || !apiKey) {
     return NextResponse.json(
@@ -35,6 +35,7 @@ export async function GET() {
     signa,
     lang: "cn",
     punc: "1",
+    vad_eos: "2000",
   });
 
   const url = `wss://rtasr.xfyun.cn/v1/ws?${params.toString()}`;

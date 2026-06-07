@@ -175,9 +175,17 @@ export function useXfyunRealtimeASR() {
     setStatus("connecting");
     setError(null);
 
+    let preWarmedStream: MediaStream | null = null;
+
     try {
-      // 1. Fetch signed WebSocket URL
-      const res = await fetch("/api/asr/xfyun-url");
+      // 1. Fetch signed WebSocket URL AND request mic in parallel
+      const [res, stream] = await Promise.all([
+        fetch("/api/asr/xfyun-url"),
+        navigator.mediaDevices.getUserMedia({ audio: true }),
+      ]);
+      preWarmedStream = stream;
+      streamRef.current = stream;
+
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as {
           error?: string;
@@ -210,7 +218,9 @@ export function useXfyunRealtimeASR() {
 
         if (action === "started") {
           setStatus("recording");
-          void beginAudioCapture();
+          if (preWarmedStream) {
+            void beginAudioCapture(preWarmedStream);
+          }
           return;
         }
 
@@ -285,19 +295,20 @@ export function useXfyunRealtimeASR() {
       cleanupAudio();
     }
 
-    async function beginAudioCapture() {
+    async function beginAudioCapture(stream: MediaStream) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        streamRef.current = stream;
-
         const audioCtx = new AudioContext({ sampleRate: 16000 });
+        if (audioCtx.state === "suspended") {
+          await audioCtx.resume();
+        }
         audioCtxRef.current = audioCtx;
 
         const source = audioCtx.createMediaStreamSource(stream);
         sourceRef.current = source;
 
+        // Note: ScriptProcessorNode is deprecated in favor of AudioWorkletNode.
+        // We use it here for broader browser compatibility. Migration to AudioWorklet
+        // would require a separate audio-worklet module and addModule() setup.
         const processor = audioCtx.createScriptProcessor(4096, 1, 1);
         processorRef.current = processor;
 
@@ -318,8 +329,12 @@ export function useXfyunRealtimeASR() {
           }
         };
 
+        // Mute output to prevent echo / sidetone
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.value = 0;
         source.connect(processor);
-        processor.connect(audioCtx.destination);
+        processor.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
       } catch (audioErr) {
         const msg =
           audioErr instanceof DOMException

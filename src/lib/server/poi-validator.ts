@@ -59,11 +59,13 @@ export async function validateWaypoints(
   const statusRes = await fetch(`${baseUrl}/api/amap/status`).catch(() => null);
   const status = (await statusRes?.json().catch(() => ({}))) as { webService?: { ready?: boolean } };
 
+  console.log("[POI Validator] AMap status:", status?.webService?.ready);
+
   if (!status?.webService?.ready) {
     return waypoints.map(wp => ({ ...wp, resolveStatus: "not_found" as const }));
   }
 
-  return Promise.all(
+  const results = await Promise.all(
     waypoints.map(async (wp) => {
       if (wp.resolveStatus === "ready") return wp;
 
@@ -117,4 +119,7 @@ export async function validateWaypoints(
       return { ...wp, resolveStatus: "not_found" as const };
     })
   );
+
+  console.log("[POI Validator] validated:", results.map(r => ({ name: r.name, status: r.resolveStatus })));
+  return results;
 }

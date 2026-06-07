@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   RouteSegmentSnapshot,
   RouteVariantSnapshot,
@@ -214,10 +214,22 @@ export function useRouteVariantRouting(
     [resolvedWaypoints],
   );
 
+  const cacheRef = useRef<{ variantId: string; resolvedKey: string } | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     if (!variant) {
       setRoutedVariant(null);
+      cacheRef.current = null;
+      return;
+    }
+
+    // Skip if waypoints haven't changed — avoids re-requesting routes on every room poll
+    if (
+      cacheRef.current &&
+      cacheRef.current.variantId === variant.id &&
+      cacheRef.current.resolvedKey === resolvedKey
+    ) {
       return;
     }
 
@@ -242,6 +254,7 @@ export function useRouteVariantRouting(
         const updatedVariant: RouteVariantSnapshot = { ...currentVariant, segments: nextSegments as RouteSegmentSnapshot[] };
                 setRoutedVariant(summarizeVariant(updatedVariant));
         setIsLoading(false);
+        cacheRef.current = { variantId: currentVariant.id, resolvedKey };
       }
     }
 

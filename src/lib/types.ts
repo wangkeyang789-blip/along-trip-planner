@@ -1,12 +1,3 @@
-export type Member = {
-  id: string;
-  name: string;
-  initials: string;
-  color: string;
-  isSpeaking?: boolean;
-  isMuted?: boolean;
-};
-
 export type Place = {
   id: string;
   name: string;

@@ -1,32 +1,9 @@
-﻿export type RoomMemberSnapshot = {
-  id: string;
-  name: string;
-  initials: string;
-  color: string;
-  isHost: boolean;
-  isOnline: boolean;
-  isMuted: boolean;
-  isSpeaking: boolean;
-  transcript?: string;
-  joinedAt: number;
-  lastSeenAt: number;
-};
-
 export type ConversationTurnSnapshot = {
   id: string;
   userId: string;
   userName: string;
   text: string;
   createdAt: number;
-};
-
-export type ConversationSnapshot = {
-  rollingSummary: string | null;
-  recentTurns: ConversationTurnSnapshot[];
-  version: number;
-  lastSpeechAt: number | null;
-  updatedAt: number;
-  compressedUntilVersion: number;
 };
 
 export type TransportMode =
@@ -87,52 +64,4 @@ export type PlanningSnapshot = {
   routeUpdatedAt: number | null;
   updatedAt: number;
   updatedBy: string | null;
-};
-
-export type TrtcReadiness = {
-  ready: boolean;
-  sdkAppId: string | null;
-  missing: string[];
-};
-
-export type RoomSnapshot = {
-  code: string;
-  title: string;
-  createdAt: number;
-  expiresAt: number;
-  participantLimit: number;
-  version: number;
-  members: RoomMemberSnapshot[];
-  conversation: ConversationSnapshot;
-  planning: PlanningSnapshot;
-  trtc: TrtcReadiness;
-};
-
-export type JoinRoomResponse = {
-  room: RoomSnapshot;
-  member: RoomMemberSnapshot;
-};
-
-export type ConversationPatch = Partial<
-  Pick<
-    ConversationSnapshot,
-    "rollingSummary" | "recentTurns" | "version" | "lastSpeechAt" | "compressedUntilVersion"
-  >
->;
-
-export type RoomStatePatch = Partial<
-  Pick<
-    PlanningSnapshot,
-    | "summary"
-    | "routeDescription"
-    | "waypoints"
-    | "routeVariants"
-    | "selectedVariantId"
-    | "city"
-    | "summaryUpdatedAt"
-    | "routeUpdatedAt"
-  >
-> & {
-  conversation?: ConversationPatch;
-  updatedBy?: string | null;
 };
