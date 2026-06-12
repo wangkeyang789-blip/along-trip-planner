@@ -1,5 +1,5 @@
 ﻿import { NextResponse } from "next/server";
-import { requestDashScopeJson, getPreferredModelPool } from "@/lib/server/dashscope";
+import { requestDeepSeekJson } from "@/lib/server/deepseek";
 import { validateWaypoints } from "@/lib/server/poi-validator";
 import type {
   ConversationTurnSnapshot,
@@ -171,65 +171,10 @@ function normalizeRouteContent(content: string) {
 
 // ====== Prompts (Chinese, hard constraints, negative examples, few-shot, dynamic themes) ======
 
-const HARD_CONSTRAINTS = `
-【硬性约束——违反任何一条都视为失败】
-1. 所有地点名必须是真实存在的中国 POI 名称，不确定就选你确定存在的替代品。不要使用英文名，必须用中文名称（如"八达岭长城"而非"The Great Wall"）。
-2. 单个方案内相邻两个地点的直线距离不超过 30 公里。禁止在城市两端来回跳跃（如"故宫→长城→三里屯→颐和园"）。
-3. 每个方案包含 3 到 6 个地点，用 recommendedTransport 标注每个地点到下一个的推荐交通方式（walking/transit/driving/bicycling/electrobike）。
-4. 不要编造不存在的 POI，不要使用过于冷门或无法在高德地图上搜索到的地点。
-`;
-
-const NEGATIVE_EXAMPLES = `
-【反面示例——以下都是错误做法】
-✗ 错误：{ "name": "The Great Wall" } → 正确：{ "name": "八达岭长城" }
-✗ 错误：故宫→长城→三里屯→颐和园（城市两端折返）→ 正确：故宫→景山→北海→什刹海（同一片区）
-✗ 错误：{ "name": "天宫院景区" }（不存在）→ 正确：{ "name": "天坛公园" }
-✗ 错误：两个方案中 waypoints 完全一样只是换了名字 → 正确：每个方案有不同的地点选择
-`;
-
-const FEWSHOT_EXAMPLES = `
-【成功案例——北京 2 日游】
-
-方案一（经典必打卡）：
-{
-  "id": "classic",
-  "name": "经典必打卡",
-  "description": "覆盖北京最核心的历史文化景点",
-  "waypoints": [
-    { "id": "c1", "name": "天安门广场", "order": 0, "recommendedTransport": "walking" },
-    { "id": "c2", "name": "故宫博物院", "order": 1, "recommendedTransport": "walking" },
-    { "id": "c3", "name": "景山公园", "order": 2, "recommendedTransport": "walking" },
-    { "id": "c4", "name": "什刹海", "order": 3, "recommendedTransport": "walking" },
-    { "id": "c5", "name": "南锣鼓巷", "order": 4, "recommendedTransport": "walking" }
-  ]
-}
-
-方案二（轻松漫步）：
-{
-  "id": "relaxed",
-  "name": "轻松漫步",
-  "description": "节奏舒缓，适合家庭和老人",
-  "waypoints": [
-    { "id": "r1", "name": "北海公园", "order": 0, "recommendedTransport": "walking" },
-    { "id": "r2", "name": "恭王府", "order": 1, "recommendedTransport": "walking" },
-    { "id": "r3", "name": "烟袋斜街", "order": 2, "recommendedTransport": "walking" },
-    { "id": "r4", "name": "后海酒吧街", "order": 3, "recommendedTransport": "walking" }
-  ]
-}
-
-方案三（美食文化）：
-{
-  "id": "food",
-  "name": "美食文化线",
-  "description": "以美食为主线串联行程",
-  "waypoints": [
-    { "id": "f1", "name": "护国寺小吃街", "order": 0, "recommendedTransport": "walking" },
-    { "id": "f2", "name": "前门大街", "order": 1, "recommendedTransport": "transit" },
-    { "id": "f3", "name": "牛街清真美食街", "order": 2, "recommendedTransport": "transit" },
-    { "id": "f4", "name": "簋街", "order": 3, "recommendedTransport": "transit" },
-    { "id": "f5", "name": "三里屯太古里", "order": 4, "recommendedTransport": "transit" }
-  ]
-}
+const CORE_CONSTRAINTS = `
+【核心要求】
+1. 所有地点名必须是真实存在的中国 POI 名称，不确定就选你确定存在的替代品。不要用英文名，必须用中文名称（如"八达岭长城"而非"The Great Wall"）。
+2. 不要编造不存在的 POI，不要使用过于冷门或无法在高德地图上搜索到的地点。
 `;
 
 function promptForScope(scope: PlanScope, city?: string): string {
@@ -240,7 +185,7 @@ function promptForScope(scope: PlanScope, city?: string): string {
 
   if (scope === "summary") {
     return `你是旅行规划助手的意图理解模块。分析用户的对话，提取共识和偏好。
-${HARD_CONSTRAINTS}
+${CORE_CONSTRAINTS}
 
 【输出格式——纯 JSON】
 {
@@ -253,27 +198,26 @@ ${HARD_CONSTRAINTS}
 
   }
 
-  return `你是旅行规划助手的路线规划模块。根据已确认的需求生成 3 条可行的旅行路线。
-${HARD_CONSTRAINTS}
-${NEGATIVE_EXAMPLES}
-${FEWSHOT_EXAMPLES}
+  return `你是旅行规划助手的路线规划模块。根据用户讨论自由理解意图，生成 1 条最优旅行路线。
 
-【动态主题】
-不要硬编码"经典必打卡/轻松漫步/美食文化"。从对话中找出用户真正在意的 2-3 个决策维度：
-- 如果用户在争论高铁vs自驾 → 方案1=高铁方案，方案2=自驾方案
-- 如果用户偏好各不相同 → 为每个人的偏好各生成一个方案
-- 如果只有一个核心偏好 → 围绕它产出不同侧重点的变体
+请根据用户对话的上下文语义来理解：
+- 用户提到想去哪里，就把相关地点加入行程
+- 用户提到不想去或要删除哪里，就从行程中移除
+- 注意用户的偏好（如轻松游、美食优先、少走路等），体现在路线设计中
+- 不要机械匹配关键词，要理解上下文语义
+
+${CORE_CONSTRAINTS}
 
 【输出格式——纯 JSON】
 {
   "summary": "一段话概述最终路线方案的设计思路",
-  "routeDescription": "一句话描述这组方案的特点",
+  "routeDescription": "一句话描述这条路线的特点",
   "city": "目标城市",
   "routeVariants": [
     {
-      "id": "方案唯一标识",
-      "name": "方案名称（与对话内容对齐）",
-      "description": "方案描述",
+      "id": "default",
+      "name": "推荐路线",
+      "description": "根据讨论生成的最优路线",
       "transportSummary": "整体交通建议",
       "waypoints": [
         { "id": "地点ID", "name": "真实POI名称", "description": "为什么选这里", "order": 0, "recommendedTransport": "walking" }
@@ -282,7 +226,7 @@ ${FEWSHOT_EXAMPLES}
   ]
 }
 
-routeVariants 必须是恰好 3 个方案，每个 3-6 个 waypoints。waypoint 的 name 必须是真实可搜索的中文 POI 名称。
+routeVariants 必须恰好包含 1 个方案，包含 3-6 个 waypoints。waypoint 的 name 必须是真实可搜索的中文 POI 名称。
 ${city ? `当前目标城市是 ${city}，请围绕此城市规划。` : "请先从对话中推断城市。"}`;
 }
 
@@ -314,42 +258,44 @@ export async function POST(request: Request) {
   const recentTurns = normalizeTurns(body.recentTurns || body.conversation?.recentTurns || body.discussion);
   const rollingSummary = stringValue(body.rollingSummary || body.conversation?.rollingSummary);
   const city = stringValue(body.city);
-  const preferredModels = getPreferredModelPool(scope);
+  console.log("[AI Plan] request received:", { scope, city, turnCount: recentTurns.length });
   const discussionText = buildDiscussionText(rollingSummary, recentTurns);
   const messages = [
     { role: "system", content: promptForScope(scope, city) },
     { role: "user", content: `当前城市: ${city || "未知"}\n\n${discussionText}` },
   ];
+  console.log("[AI Plan] messages built, calling DeepSeek");
 
   // --- compress ---
   if (scope === "compress") {
-    const result = await requestDashScopeJson<CompressOutput>(messages, {
-      validateContent: normalizeCompressContent, preferredModels,
+    const result = await requestDeepSeekJson<CompressOutput>(messages, {
+      validateContent: normalizeCompressContent,
     });
     if (!result.configured) return NextResponse.json(result, { status: 501 });
     if (!result.ok) return NextResponse.json({ configured: true, scope, error: result.error || "压缩失败", attempts: result.attempts }, { status: 502 });
     if (!result.parsed) return NextResponse.json({ configured: true, scope, error: "压缩结果不完整" }, { status: 502 });
-    return NextResponse.json({ configured: true, source: "dashscope", scope, model: result.model, attempts: result.attempts, rollingSummary: result.parsed.rollingSummary });
+    return NextResponse.json({ configured: true, source: "deepseek", scope, model: result.model, attempts: result.attempts, rollingSummary: result.parsed.rollingSummary });
   }
 
   // --- summary ---
   if (scope === "summary") {
-    const result = await requestDashScopeJson<SummaryOutput>(messages, {
-      validateContent: normalizeSummaryContent, preferredModels,
+    const result = await requestDeepSeekJson<SummaryOutput>(messages, {
+      validateContent: normalizeSummaryContent,
     });
     if (!result.configured) return NextResponse.json(result, { status: 501 });
     if (!result.ok) return NextResponse.json({ configured: true, scope, error: result.error || "摘要失败", attempts: result.attempts }, { status: 502 });
     if (!result.parsed) return NextResponse.json({ configured: true, scope, error: "摘要数据不完整" }, { status: 502 });
     return NextResponse.json({
-      configured: true, source: "dashscope", scope, model: result.model, attempts: result.attempts,
+      configured: true, source: "deepseek", scope, model: result.model, attempts: result.attempts,
       plan: { summary: result.parsed.summary, city: result.parsed.city || city, themes: result.parsed.themes },
     });
   }
 
   // --- route ---
-  const result = await requestDashScopeJson<AgentPlan>(messages, {
-    validateContent: (content, _model) => normalizeRouteContent(content), preferredModels,
+  const result = await requestDeepSeekJson<AgentPlan>(messages, {
+    validateContent: (content) => normalizeRouteContent(content),
   });
+  console.log("[AI Plan] DeepSeek result:", { ok: result.ok, configured: result.configured, error: result.error, attempts: result.attempts?.length });
   if (!result.configured) return NextResponse.json(result, { status: 501 });
   if (!result.ok) return NextResponse.json({ configured: true, scope, error: result.error || "路线生成失败", attempts: result.attempts }, { status: 502 });
   if (!result.parsed) return NextResponse.json({ configured: true, scope, error: "路线数据不完整" }, { status: 502 });
@@ -357,6 +303,7 @@ export async function POST(request: Request) {
   // POI validation ring
   const allWaypoints = result.parsed.routeVariants.flatMap(v => v.waypoints);
   const validated = await validateWaypoints(allWaypoints, result.parsed.city || city);
+  console.log("[AI Plan] POI validation done:", validated.map(v => ({ name: v.name, status: v.resolveStatus, location: v.location })));
 
   // Merge validated coordinates back into variants
   const validatedVariants = result.parsed.routeVariants.map(variant => ({
@@ -367,8 +314,9 @@ export async function POST(request: Request) {
     }),
   }));
 
+  console.log("[AI Plan] returning plan with variants:", validatedVariants.length, "waypoints:", validatedVariants[0]?.waypoints?.length);
   return NextResponse.json({
-    configured: true, source: "dashscope", scope, model: result.model, attempts: result.attempts,
+    configured: true, source: "deepseek", scope, model: result.model, attempts: result.attempts,
     plan: { ...result.parsed, routeVariants: validatedVariants },
   });
 }

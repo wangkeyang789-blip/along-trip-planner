@@ -98,6 +98,7 @@ export function useWaypointResolver(
   const inputsRef = useRef(waypointInputs);
   const cityRef = useRef(city);
   const resolveIdRef = useRef(0);
+  const weatherCacheRef = useRef<Record<string, string>>({});
   inputsRef.current = waypointInputs;
   cityRef.current = city;
 
@@ -135,25 +136,6 @@ export function useWaypointResolver(
         if (cancelled || currentResolveId !== resolveIdRef.current) return;
         setWaypoints(results);
 
-        try {
-          const weatherRes = await fetch(
-            `/api/amap/weather?city=${encodeURIComponent(targetCity)}`,
-            { cache: "no-store" },
-          );
-          const weatherData = (await weatherRes.json()) as {
-            data?: { lives?: Array<{ weather?: string; temperature?: string }> };
-          };
-          const live = weatherData?.data?.lives?.[0];
-          if (live && !cancelled) {
-            setWeatherText(
-              [live.weather, live.temperature ? live.temperature + "℃" : ""]
-                .filter(Boolean)
-                .join(" · "),
-            );
-          }
-        } catch {
-          // weather is optional
-        }
       } catch {
         if (!cancelled) setError("地图服务暂时不可用");
       } finally {
@@ -165,6 +147,34 @@ export function useWaypointResolver(
     // Only re-resolve when the key or inputs length changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(waypointInputs) + "|" + city + "|" + (variantId || "")]);
+
+  // Weather only depends on city — cache to avoid redundant fetches
+  useEffect(() => {
+    if (!city) {
+      setWeatherText("");
+      return;
+    }
+    const cached = weatherCacheRef.current[city];
+    if (cached !== undefined) {
+      setWeatherText(cached);
+      return;
+    }
+    fetch(`/api/amap/weather?city=${encodeURIComponent(city)}`, { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data: { data?: { lives?: Array<{ weather?: string; temperature?: string }> } }) => {
+        const live = data?.data?.lives?.[0];
+        if (live) {
+          const text = [live.weather, live.temperature ? live.temperature + "℃" : ""]
+            .filter(Boolean)
+            .join(" · ");
+          weatherCacheRef.current[city] = text;
+          setWeatherText(text);
+        }
+      })
+      .catch(() => {
+        // weather is optional
+      });
+  }, [city]);
 
   return { waypoints, weatherText, isConfigured, isLoading, error };
 }
